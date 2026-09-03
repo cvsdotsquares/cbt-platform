@@ -1,0 +1,37 @@
+{
+  "name": "cbt-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Enterprise Computer Based Test Examination Management System",
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter @cbt/api dev\" \"pnpm --filter @cbt/web dev\"",
+    "build": "pnpm --filter @cbt/shared build && pnpm --filter @cbt/api build && pnpm --filter @cbt/web build",
+    "build:api": "pnpm --filter @cbt/shared build && pnpm --filter @cbt/api prisma:generate && pnpm --filter @cbt/api build",
+    "build:web": "pnpm --filter @cbt/shared build && pnpm --filter @cbt/web build",
+    "start:api": "pnpm --filter @cbt/api prisma:migrate:deploy && pnpm --filter @cbt/api start:prod",
+    "start:web": "pnpm --filter @cbt/web start",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "db:generate": "pnpm --filter @cbt/api prisma:generate",
+    "db:migrate": "pnpm --filter @cbt/api prisma:migrate",
+    "db:migrate:deploy": "pnpm --filter @cbt/api prisma:migrate:deploy",
+    "db:seed": "pnpm --filter @cbt/api prisma:seed",
+    "db:setup": "pnpm docker:up && pnpm db:migrate:deploy && pnpm db:seed",
+    "docker:up": "docker compose -f infra/docker/docker-compose.yml up -d",
+    "docker:down": "docker compose -f infra/docker/docker-compose.yml down",
+    "docker:prod:build": "docker compose -f infra/docker/docker-compose.prod.yml --env-file infra/docker/.env.production build",
+    "docker:prod:up": "docker compose -f infra/docker/docker-compose.prod.yml --env-file infra/docker/.env.production up -d",
+    "docker:prod:down": "docker compose -f infra/docker/docker-compose.prod.yml --env-file infra/docker/.env.production down",
+    "docker:prod:logs": "docker compose -f infra/docker/docker-compose.prod.yml --env-file infra/docker/.env.production logs -f",
+    "docker:prod:seed": "docker compose -f infra/docker/docker-compose.prod.yml --env-file infra/docker/.env.production run --rm api npx prisma db seed"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}
