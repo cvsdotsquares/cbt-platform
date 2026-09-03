@@ -52,3 +52,4 @@ temp/
 *.tar.gz
 *.bak
 _tmp-*
+apps/api/prisma/dev.db
