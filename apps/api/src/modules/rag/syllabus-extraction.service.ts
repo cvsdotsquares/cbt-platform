@@ -343,7 +343,7 @@ export class SyllabusExtractionService {
     const sentenceStarters = /^(the|in|on|at|when|this|that|these|those|it|there|as|if|because|although|while|after|before|during|from|with|which|who|what|why|a|an|our|you|we|they|he|she|for|to|of|but|or|not|is|are|was|were|has|have|had|will|would|can|could|should|may|might)\b/i;
     if (sentenceStarters.test(t) && words.length >= 6) return false;
 
-    // Title-style headings like "How I Taught My Grandmother to Read" (common in English textbooks)
+    // Sentence-shaped titles can still be valid textbook chapter headings.
     if (/^how\s/i.test(t) && words.length <= 10 && !/[.!?]$/.test(t)) return true;
 
     const commonVerbs = /\b(is|are|was|were|been|being|have|has|had|do|does|did|will|would|shall|should|can|could|may|might)\b/i;
@@ -647,17 +647,13 @@ export class SyllabusExtractionService {
       ? 'This PDF is a SINGLE chapter document.'
       : 'This PDF is a FULL textbook.';
 
-    const isEnglishSubject = /english|hindi|language/i.test(options?.subjectName ?? '');
     const isMathOrScience = /math|science|physics|chemistry|biology/i.test(options?.subjectName ?? '');
 
-    const englishRules = isEnglishSubject
-      ? `
-- ENGLISH/LANGUAGE TEXTBOOK: Numbered units in Contents are chapters (e.g. "1. How I Taught My Grandmother to Read").
-- Topics are paired poems or supplementary texts listed directly below each chapter in Contents (e.g. "Bharat Our Land", "Words").
-- Do NOT treat Constitution of India, Fundamental Rights, Fundamental Duties, Foreword, or About the Book as chapters.`
-      : `
-- Topics are numbered sections (e.g. "1.1 Introduction", "2.3 Motion") or bold section headings within each chapter.
-- For Social Science combined books, list section headings under each chapter as topics.`;
+    const textbookRules = `
+  - For every subject, numbered units or chapters in Contents are chapters, including literature units, lessons, experiments, and activities.
+  - Topics are subordinate numbered sections (e.g. "1.1 Introduction", "2.3 Motion"), poems, supplementary texts, experiments, activities, or bold section headings listed under a chapter.
+  - Use the subject's own chapter structure; do not assume every subject uses the same topic labels.
+  - Do NOT treat Constitution of India, Fundamental Rights, Fundamental Duties, Foreword, About the Book, Acknowledgements, or repeated page headers as chapters.`;
 
     const mathScienceRules = isMathOrScience
       ? `
@@ -681,7 +677,7 @@ CRITICAL RULES:
 - NEVER use the book cover title or series name as a chapter (e.g. "Understanding Society: India and Beyond" is a BOOK title, not Chapter 1).
 - Chapter 1 comes from the Contents page (e.g. "Understanding Social Science", "The French Revolution").
 - SKIP front matter: Constitution of India, Fundamental Rights, Fundamental Duties, Foreword, About the Book, Acknowledgements.
-${englishRules}
+${textbookRules}
 ${mathScienceRules}
 - Use ONLY text from the document. No outside knowledge.`;
 

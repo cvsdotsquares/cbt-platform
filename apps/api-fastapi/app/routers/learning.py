@@ -173,3 +173,76 @@ async def student_dashboard(
         "topicMasteries": [],
         "syllabusCoverage": syllabus_coverage,
     }
+
+
+def _map_progress_status(status: str) -> str:
+    if status == "COMPLETED":
+        return "completed"
+    if status == "IN_PROGRESS":
+        return "in-progress"
+    return "planned"
+
+
+@router.get("/institute/lessons")
+async def institute_lessons(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    tenant_id = current_user.tenant_id
+    batches = await db.execute(
+        text(
+            """
+            SELECT b.id, b.name, ac.name AS class_name
+            FROM batches b
+            JOIN academic_classes ac ON ac.id = b.academic_class_id
+            WHERE b.tenant_id = :tenant_id AND b.is_active = true
+            ORDER BY b.academic_year DESC, b.name ASC
+            LIMIT 40
+            """
+        ),
+        {"tenant_id": tenant_id},
+    )
+    batch_rows = batches.mappings().all()
+    items = []
+    for batch in batch_rows:
+        progress = await db.execute(
+            text(
+                """
+                SELECT sp.status, c.id AS chapter_id, c.number, c.title,
+                       s.name AS subject_name
+                FROM syllabus_progress sp
+                JOIN chapters c ON c.id = sp.chapter_id
+                JOIN books bk ON bk.id = c.book_id
+                JOIN subjects s ON s.id = bk.subject_id
+                WHERE sp.batch_id = :batch_id AND sp.chapter_id IS NOT NULL
+                ORDER BY s.name, c.number
+                """
+            ),
+            {"batch_id": batch["id"]},
+        )
+        for row in progress.mappings():
+            items.append(
+                {
+                    "id": f"{batch['id']}-{row['chapter_id']}",
+                    "chapterId": row["chapter_id"],
+                    "batchId": batch["id"],
+                    "title": row["title"],
+                    "description": f"{row['subject_name']} · {batch['name']}",
+                    "subjectName": row["subject_name"],
+                    "batchName": batch["name"],
+                    "className": batch["class_name"],
+                    "chapterNumber": row["number"],
+                    "status": _map_progress_status(row["status"] or "NOT_STARTED"),
+                }
+            )
+
+    status_order = {"in-progress": 0, "planned": 1, "completed": 2}
+    items.sort(
+        key=lambda x: (
+            status_order.get(x["status"], 9),
+            x["className"],
+            x["subjectName"],
+            x["chapterNumber"],
+        )
+    )
+    return {"items": items, "batchCount": len(batch_rows)}

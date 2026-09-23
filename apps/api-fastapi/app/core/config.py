@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import warnings
+from pathlib import Path
 from typing import Any, Union
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
@@ -20,6 +21,9 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
     JWT_EXPIRY_MINUTES: int = 30 
+    OPENAI_API_KEY: str = "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"
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_MODEL: str = "gpt-4o-mini"
 
     # ============================================================
     # DATABASE - UPPERCASE (from .env)
@@ -45,7 +49,13 @@ class Settings(BaseSettings):
 
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
 
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    REFRESH_TOKEN_EXPIRE_HOURS: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "REFRESH_TOKEN_EXPIRE_HOURS",
+            "REFRESH_TOKEN_EXPIRY_HOURS",
+        ),
+    )
 
     # ============================================================
     # BCRYPT - UPPERCASE (from .env)
@@ -59,12 +69,17 @@ class Settings(BaseSettings):
 
     CORS_ORIGINS: Union[list[str], str] = Field(
         default=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
             "http://localhost:3002",
             "http://127.0.0.1:3002",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
         ],
         validation_alias=AliasChoices("CORS_ORIGINS", "BACKEND_CORS_ORIGINS"),
+    )
+
+    APP_URL: str = Field(
+        default="http://localhost:3002",
+        description="Public web app URL for invite signup links",
     )
 
     # ============================================================
@@ -97,12 +112,39 @@ class Settings(BaseSettings):
         return self.ACCESS_TOKEN_EXPIRE_MINUTES
     
     @property
+    def refresh_token_expire_hours(self) -> int:
+        return self.REFRESH_TOKEN_EXPIRE_HOURS
+
+    @property
     def refresh_token_expire_days(self) -> int:
-        return self.REFRESH_TOKEN_EXPIRE_DAYS
+        return max(1, (self.REFRESH_TOKEN_EXPIRE_HOURS + 23) // 24)
     
     @property
     def bcrypt_rounds(self) -> int:
         return self.BCRYPT_ROUNDS
+
+    def resolve_public_app_url(self) -> str:
+        """Web origin for invite signup links (matches @cbt/web dev port 3002 by default)."""
+        configured = (self.APP_URL or "").strip().rstrip("/")
+        legacy_defaults = {"http://localhost:3000", "http://127.0.0.1:3000"}
+        if configured and configured not in legacy_defaults:
+            return configured
+
+        origins = self.CORS_ORIGINS if isinstance(self.CORS_ORIGINS, list) else []
+        for port in ("3002", "3000"):
+            for origin in origins:
+                normalized = origin.strip().rstrip("/")
+                if f":{port}" in normalized and (
+                    "localhost" in normalized or "127.0.0.1" in normalized
+                ):
+                    return normalized
+
+        for origin in origins:
+            normalized = origin.strip().rstrip("/")
+            if ":8000" not in normalized and ":8080" not in normalized:
+                return normalized
+
+        return configured or "http://localhost:3002"
 
     # ============================================================
     # CORS PARSER
@@ -191,9 +233,9 @@ class Settings(BaseSettings):
                 "ACCESS_TOKEN_EXPIRE_MINUTES must be positive."
             )
 
-        if self.REFRESH_TOKEN_EXPIRE_DAYS <= 0:
+        if self.REFRESH_TOKEN_EXPIRE_HOURS <= 0:
             raise ValueError(
-                "REFRESH_TOKEN_EXPIRE_DAYS must be positive."
+                "REFRESH_TOKEN_EXPIRE_HOURS must be positive."
             )
 
         if not 4 <= self.BCRYPT_ROUNDS <= 31:
@@ -208,7 +250,7 @@ class Settings(BaseSettings):
     # ============================================================
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=Path(__file__).resolve().parents[2] / ".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
@@ -246,4 +288,5 @@ print("JWT ALGORITHM :", settings.JWT_ALGORITHM)
 print("JWT SECRET LEN:", len(settings.JWT_SECRET))
 print("JWT FINGERPRINT:", jwt_secret_fingerprint())
 print("JWT EXPIRY    :", settings.ACCESS_TOKEN_EXPIRE_MINUTES, "minutes")
+print("REFRESH EXPIRY:", settings.REFRESH_TOKEN_EXPIRE_HOURS, "hours")
 print("==============================================") 

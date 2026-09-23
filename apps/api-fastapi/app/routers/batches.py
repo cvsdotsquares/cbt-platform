@@ -22,6 +22,7 @@ from app.models.curriculum import (
 )
 from app.models.material import StudyMaterial
 from app.models.user import User
+from app.services.teacher_scope import get_teacher_batch_ids, is_teacher_scoped
 
 router = APIRouter(prefix="/batches", tags=["Batches"])
 
@@ -129,9 +130,14 @@ async def _get_batch_or_404(db: AsyncSession, batch_id: str, tenant_id: str) -> 
     return batch
 
 
-def _batch(b: Batch, enrollment_count: int) -> dict:
+def _batch(
+    b: Batch,
+    enrollment_count: int,
+    *,
+    assignment_user_id: str | None = None,
+) -> dict:
     cls = b.academic_class
-    return {
+    payload: dict = {
         "id": b.id,
         "name": b.name,
         "academicYear": b.academic_year,
@@ -144,6 +150,19 @@ def _batch(b: Batch, enrollment_count: int) -> dict:
         },
         "_count": {"enrollments": enrollment_count},
     }
+    if assignment_user_id is not None:
+        payload["teacherAssignments"] = [
+            {
+                "subject": {
+                    "id": a.subject.id,
+                    "name": a.subject.name,
+                    "code": a.subject.code,
+                },
+            }
+            for a in b.teacher_assignments
+            if str(a.user_id) == assignment_user_id and a.subject is not None
+        ]
+    return payload
 
 
 def _batch_detail(batch: Batch, enrollments: list[dict]) -> dict:
@@ -172,6 +191,13 @@ async def list_batches(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    teacher_scoped = is_teacher_scoped(current_user)
+    teacher_batch_ids: list[str] | None = None
+    if teacher_scoped:
+        teacher_batch_ids = await get_teacher_batch_ids(db, str(current_user.id))
+        if not teacher_batch_ids:
+            return []
+
     enrollment_counts = (
         select(
             BatchEnrollment.batch_id,
@@ -181,15 +207,29 @@ async def list_batches(
         .subquery()
     )
 
+    load_opts = [selectinload(Batch.academic_class)]
+    assignment_user_id: str | None = None
+    if teacher_scoped:
+        assignment_user_id = str(current_user.id)
+        load_opts.append(
+            selectinload(Batch.teacher_assignments).selectinload(TeacherAssignment.subject)
+        )
+
     stmt = (
         select(Batch, func.coalesce(enrollment_counts.c.count, 0))
         .outerjoin(enrollment_counts, Batch.id == enrollment_counts.c.batch_id)
         .where(Batch.tenant_id == current_user.tenant_id)
         .order_by(Batch.created_at.desc())
-        .options(selectinload(Batch.academic_class))
+        .options(*load_opts)
     )
+    if teacher_batch_ids is not None:
+        stmt = stmt.where(Batch.id.in_(teacher_batch_ids))
+
     result = await db.execute(stmt)
-    return [_batch(batch, int(count)) for batch, count in result.all()]
+    return [
+        _batch(batch, int(count), assignment_user_id=assignment_user_id)
+        for batch, count in result.all()
+    ]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -659,14 +699,14 @@ async def _uploaded_chapter_ids(
     result = await db.execute(
         text(
             f"""
-            SELECT sm.chapter_id, sm.book_id
+            SELECT sm.chapter_id, sm.book_id, sm.is_full_book, sm.id
             FROM study_materials sm
             LEFT JOIN books b ON b.id::text = sm.book_id::text
             LEFT JOIN subjects s ON s.id::text = COALESCE(sm.subject_id::text, b.subject_id::text)
             LEFT JOIN academic_classes ac
               ON ac.id::text = COALESCE(sm.academic_class_id::text, s.academic_class_id::text)
             WHERE sm.tenant_id::text = :tenant_id
-              AND sm.status = 'READY'
+              AND sm.status IN ('READY', 'INDEXING', 'PENDING')
               AND ac.level = :class_level
               {subject_clause}
             """
@@ -675,11 +715,14 @@ async def _uploaded_chapter_ids(
     )
     ids: set[str] = set()
     book_ids: set[str] = set()
-    for chapter_id, book_id in result.all():
+    full_book_material_ids: list[str] = []
+    for chapter_id, book_id, is_full_book, material_id in result.all():
         if chapter_id:
             ids.add(str(chapter_id))
         if book_id:
             book_ids.add(str(book_id))
+        if is_full_book:
+            full_book_material_ids.append(str(material_id))
 
     if book_ids:
         book_rows = await db.execute(
@@ -694,7 +737,47 @@ async def _uploaded_chapter_ids(
         )
         ids.update(str(row[0]) for row in book_rows.all())
 
+    if full_book_material_ids:
+        chunk_rows = await db.execute(
+            text(
+                """
+                SELECT DISTINCT dc.chapter_id
+                FROM document_chunks dc
+                WHERE dc.material_id::text = ANY(CAST(:material_ids AS text[]))
+                  AND dc.chapter_id IS NOT NULL
+                """
+            ),
+            {"material_ids": full_book_material_ids},
+        )
+        ids.update(str(row[0]) for row in chunk_rows.all() if row[0])
+
     return ids
+
+
+async def _batch_marked_chapter_ids(
+    db: AsyncSession,
+    batch_id: str,
+    class_level: int,
+    subject_id: str | None,
+) -> set[str]:
+    """Chapters the teacher already marked on this batch (keep visible even if upload filter changes)."""
+    stmt = (
+        select(Chapter.id)
+        .join(SyllabusProgress, SyllabusProgress.chapter_id == Chapter.id)
+        .join(Book, Chapter.book_id == Book.id)
+        .join(Subject, Book.subject_id == Subject.id)
+        .join(AcademicClass, Subject.academic_class_id == AcademicClass.id)
+        .where(
+            SyllabusProgress.batch_id == batch_id,
+            SyllabusProgress.chapter_id.isnot(None),
+            SyllabusProgress.topic_id.is_(None),
+            AcademicClass.level == class_level,
+        )
+    )
+    if subject_id:
+        stmt = stmt.where(Subject.id == subject_id)
+    rows = await db.execute(stmt)
+    return {str(row[0]) for row in rows.all()}
 
 
 @router.get("/{batch_id}/syllabus-progress")
@@ -710,6 +793,7 @@ async def get_syllabus_progress(
     chapter_ids = await _uploaded_chapter_ids(
         db, current_user.tenant_id, class_level, subject_id
     )
+    chapter_ids |= await _batch_marked_chapter_ids(db, batch_id, class_level, subject_id)
     if not chapter_ids:
         return []
 

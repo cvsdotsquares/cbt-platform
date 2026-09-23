@@ -5,3 +5,5 @@ export * from './types/api';
 export * from './types/exam';
 export * from './types/auth';
 export * from './utils/exam-datetime';
+export * from './utils/subject-guess';
+export * from './utils/proctoring-violations';

@@ -12,18 +12,6 @@ import {
   verifyAccessToken,
 } from '@/lib/auth-cookies';
 
-function setAuthCookies(
-  res: NextResponse,
-  accessToken: string,
-  refreshToken: string,
-  admin: boolean,
-) {
-  res.cookies.set(ACCESS_TOKEN_COOKIE, accessToken, accessCookieOptions());
-  res.cookies.set(REFRESH_TOKEN_COOKIE, refreshToken, refreshCookieOptions());
-  res.cookies.set(AUTH_FLAG_COOKIE, '1', refreshCookieOptions());
-  res.cookies.set(ADMIN_FLAG_COOKIE, admin ? '1' : '0', refreshCookieOptions());
-}
-
 function clearAuthCookies(res: NextResponse) {
   const clear = clearCookieOptions();
   res.cookies.set(ACCESS_TOKEN_COOKIE, '', clear);
@@ -32,9 +20,11 @@ function clearAuthCookies(res: NextResponse) {
   res.cookies.set(ADMIN_FLAG_COOKIE, '', clear);
 }
 
-export async function GET() {
-  const cookieStore = await cookies();
-  const accessToken = cookieStore.get(ACCESS_TOKEN_COOKIE)?.value;
+export async function GET(request: Request) {
+  let accessToken = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+  if (!accessToken) {
+    accessToken = (await cookies()).get(ACCESS_TOKEN_COOKIE)?.value ?? '';
+  }
 
   if (!accessToken) {
     return NextResponse.json({ authenticated: false }, { status: 401 });
@@ -86,12 +76,21 @@ export async function POST(request: Request) {
   const admin = isAdmin(roles);
 
   const res = NextResponse.json({ ok: true, isAdmin: admin });
-  setAuthCookies(res, accessToken, refreshToken, admin);
+  res.cookies.set(ACCESS_TOKEN_COOKIE, accessToken, accessCookieOptions());
+  res.cookies.set(REFRESH_TOKEN_COOKIE, refreshToken, refreshCookieOptions());
+  res.cookies.set(AUTH_FLAG_COOKIE, '1', refreshCookieOptions());
+  res.cookies.set(ADMIN_FLAG_COOKIE, admin ? '1' : '0', refreshCookieOptions());
   return res;
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   const res = NextResponse.json({ ok: true });
-  clearAuthCookies(res);
+  const headerToken = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+  const cookieToken = (await cookies()).get(ACCESS_TOKEN_COOKIE)?.value ?? '';
+
+  // Cookies are shared across tabs; only clear when they match this tab's logout.
+  if (!headerToken || !cookieToken || headerToken === cookieToken) {
+    clearAuthCookies(res);
+  }
   return res;
 }

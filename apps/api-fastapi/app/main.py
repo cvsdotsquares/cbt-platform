@@ -1,8 +1,23 @@
+import asyncio
+import contextlib
+import sys
+
+# Psycopg async requires SelectorEventLoop on Windows (Python 3.14+ defaults to Proactor).
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.routers import auth, exam, role, user, tenant, permission, role_permission, question, health, stubs, curriculum, batches, materials, candidates, ai, analytics, onboarding, results, learning, exam_sessions
+from app.core.database import dispose_engine
+from app.services.material_indexing import indexing_watchdog_loop, resume_stuck_indexing_jobs
+from app.routers import auth, exam, role, user, tenant, permission, role_permission, question, health, stubs, curriculum, batches, materials, candidates, ai, analytics, onboarding, results, learning, exam_sessions, proctoring
 from app.middleware import RequestIDMiddleware, ResponseEnvelopeMiddleware
 
 
@@ -10,11 +25,27 @@ from app.middleware import RequestIDMiddleware, ResponseEnvelopeMiddleware
 # APPLICATION
 # ============================================================
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await resume_stuck_indexing_jobs()
+    watchdog = asyncio.create_task(indexing_watchdog_loop())
+    try:
+        yield
+    finally:
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog
+        with contextlib.suppress(Exception):
+            await dispose_engine()
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 
@@ -137,6 +168,11 @@ app.include_router(
 
 app.include_router(
     exam_sessions.router,
+    prefix=settings.API_V1_STR,
+)
+
+app.include_router(
+    proctoring.router,
     prefix=settings.API_V1_STR,
 )
 

@@ -1,5 +1,8 @@
 import { CodingLanguage, ExamType, SessionStatus } from '../constants/enums';
 
+/** Auto-submit the attempt after this many security violations (4th violation when threshold is 3). */
+export const EXAM_VIOLATION_AUTO_SUBMIT_THRESHOLD = 3;
+
 export interface ExamSecurityPolicy {
   fullscreen: boolean;
   blockCopyPaste: boolean;

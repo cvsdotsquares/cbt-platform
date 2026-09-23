@@ -2,10 +2,22 @@ import { NextRequest, NextResponse } from 'next/server';
 import { fetchWithColdStartRetry } from '@/lib/cold-start-retry';
 import { ACCESS_TOKEN_COOKIE } from '@/lib/auth-cookies';
 
-const API_BASE = (
-  process.env.API_PROXY_URL
-  || (process.env.NODE_ENV === 'production' ? 'https://cbt-api-ktkr.onrender.com' : 'http://localhost:8000')
-).replace(/\/$/, '');
+function resolveApiBase(): string {
+  if (process.env.API_PROXY_URL?.trim()) {
+    return process.env.API_PROXY_URL.trim().replace(/\/$/, '');
+  }
+  const publicUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (publicUrl) {
+    return publicUrl.replace(/\/api\/v1\/?$/i, '').replace(/\/$/, '');
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return 'https://cbt-api-ktkr.onrender.com';
+  }
+  // Local monorepo default: FastAPI (books upload, exams, proctoring live, etc.)
+  return 'http://localhost:8000';
+}
+
+const API_BASE = resolveApiBase();
 
 function isLocalApiBase(base: string): boolean {
   try {
@@ -18,7 +30,18 @@ function isLocalApiBase(base: string): boolean {
 
 async function fetchUpstream(targetUrl: string, init: RequestInit): Promise<Response> {
   if (isLocalApiBase(API_BASE)) {
-    return fetch(targetUrl, { ...init, cache: 'no-store' });
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await fetch(targetUrl, { ...init, cache: 'no-store' });
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+    }
+    throw lastError;
   }
   return fetchWithColdStartRetry(targetUrl, init);
 }

@@ -1,11 +1,11 @@
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Literal
 from uuid import UUID
 from datetime import datetime, timezone
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,8 +39,30 @@ class QuestionVersionSchema(BaseModel):
 
 class QuestionCreate(BaseModel):
     title: Optional[str] = None
-    type: str = "MCQ"
+
+    type: Literal[
+        "MCQ",
+        "MSQ",
+        "NUMERICAL",
+        "SUBJECTIVE",
+        "CODING",
+        "CASE_STUDY",
+        "AUDIO",
+        "VIDEO",
+        "ASSERTION_REASON",
+        "FILL_BLANK",
+    ] = "MCQ"
+
     difficulty: str = "MEDIUM"
+
+    topic_id: Optional[UUID] = None
+    description: Optional[str] = None
+    content: Optional[Any] = ""
+    options: Optional[Any] = None
+    correct_answer: Optional[Any] = None
+    marks: float = 1.0
+    negative_marks: float = 0.0
+    explanation: Optional[str] = None
     topic_id: Optional[UUID] = None
     description: Optional[str] = None
     content: Optional[Any] = ""
@@ -52,12 +74,19 @@ class QuestionCreate(BaseModel):
 
 
 class QuestionUpdate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     title: Optional[str] = None
     type: Optional[str] = None
     difficulty: Optional[str] = None
     topic_id: Optional[UUID] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    content: Optional[Any] = None
+    options: Optional[Any] = None
+    correct_answer: Optional[Any] = Field(None, alias="correctAnswer")
+    marks: Optional[float] = None
+    negative_marks: Optional[float] = Field(None, alias="negativeMarks")
 
 
 class QuestionOut(BaseModel):
@@ -145,7 +174,7 @@ async def list_questions(
 
 @router.get("/{question_id}", response_model=QuestionOut)
 async def get_question(
-    question_id: UUID,
+    question_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     current_tenant: Optional[Tenant] = Depends(get_current_tenant),
@@ -162,9 +191,9 @@ async def get_question(
     return q
 
 
-@router.put("/{question_id}", response_model=QuestionOut)
+@router.api_route("/{question_id}", methods=["PUT", "PATCH"], response_model=QuestionOut)
 async def update_question(
-    question_id: UUID,
+    question_id: str,
     data: QuestionUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -180,8 +209,58 @@ async def update_question(
     if not q:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    for k, v in data.model_dump(exclude_unset=True).items():
-        setattr(q, k, v)
+    values = data.model_dump(exclude_unset=True)
+    version_values = {
+        key: values.pop(key)
+        for key in ("content", "options", "correct_answer", "marks", "negative_marks")
+        if key in values
+    }
+    for key, value in values.items():
+        setattr(q, key, value)
+
+    if version_values:
+        latest = max(q.versions, key=lambda version: version.version_number, default=None)
+        version = QuestionVersion(
+            id=uuid.uuid4(),
+            question_id=q.id,
+            version_number=(latest.version_number + 1) if latest else 1,
+            content=version_values.get("content", latest.content if latest else ""),
+            options=version_values.get("options", latest.options if latest else None),
+            correct_answer=version_values.get("correct_answer", latest.correct_answer if latest else None),
+            marks=version_values.get("marks", latest.marks if latest else 1.0),
+            negative_marks=version_values.get("negative_marks", latest.negative_marks if latest else 0.0),
+            explanation=latest.explanation if latest else None,
+        )
+        db.add(version)
+        q.current_version_id = version.id
+
+        mark_sets = []
+        mark_params: dict[str, Any] = {
+            "question_id": str(q.id),
+            "tenant_id": str(tenant_id),
+        }
+        if "marks" in version_values:
+            mark_sets.append("marks = :marks")
+            mark_params["marks"] = version_values["marks"]
+        if "negative_marks" in version_values:
+            mark_sets.append("negative_marks = :negative_marks")
+            mark_params["negative_marks"] = version_values["negative_marks"]
+        if mark_sets:
+            await db.execute(
+                text(
+                    f"""
+                    UPDATE exam_questions AS eq
+                    SET {", ".join(mark_sets)}
+                    FROM exam_sections AS es
+                    JOIN exams AS e ON e.id::text = es.exam_id::text
+                    WHERE eq.section_id::text = es.id::text
+                      AND eq.question_id::text = :question_id
+                      AND e.tenant_id::text = :tenant_id
+                      AND e.status = 'DRAFT'
+                    """
+                ),
+                mark_params,
+            )
 
     await db.commit()
     await db.refresh(q)
@@ -190,7 +269,7 @@ async def update_question(
 
 @router.delete("/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_question(
-    question_id: UUID,
+    question_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     current_tenant: Optional[Tenant] = Depends(get_current_tenant),

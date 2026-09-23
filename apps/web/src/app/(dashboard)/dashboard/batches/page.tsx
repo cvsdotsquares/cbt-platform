@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -158,6 +159,8 @@ function initials(first: string, last: string) {
 }
 
 export default function BatchesPage() {
+  const searchParams = useSearchParams();
+  const batchFromQuery = searchParams.get('batch');
   const { accessToken } = useRequireAuth(true);
   const { can } = usePermissions();
   const { user } = useAuthStore();
@@ -261,10 +264,28 @@ export default function BatchesPage() {
   }, [progress, selectedSubjectId]);
 
   useEffect(() => {
+    if (batchFromQuery && batches?.some((b) => b.id === batchFromQuery)) {
+      setSelectedBatch(batchFromQuery);
+      return;
+    }
     if (!selectedBatch && batches?.length) {
       setSelectedBatch(batches[0].id);
     }
-  }, [batches, selectedBatch]);
+  }, [batches, selectedBatch, batchFromQuery]);
+
+  useEffect(() => {
+    if (!accessToken || !selectedBatch || !enrollCandidateId) return;
+    let cancelled = false;
+    batchesApi
+      .nextRollNumber(accessToken, selectedBatch)
+      .then(({ rollNumber }) => {
+        if (!cancelled) setEnrollRoll((prev) => prev || rollNumber);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, selectedBatch, enrollCandidateId]);
 
   useEffect(() => {
     if (progress?.length && !selectedSubjectId) {
@@ -380,7 +401,7 @@ export default function BatchesPage() {
   const updateProgress = useMutation({
     mutationFn: ({ chapterId, status }: { chapterId: string; status: string }) =>
       batchesApi.updateSyllabusProgress(accessToken!, selectedBatch!, { chapterId, status }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['syllabus-progress', selectedBatch] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] }),
   });
 
   const enrolledIds = new Set((batchDetail?.enrollments ?? []).map((e) => e.candidate.id));
@@ -966,7 +987,6 @@ export default function BatchesPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             <Button
               disabled={!form.name || !form.academicClassId || createMutation.isPending}
               onClick={() => createMutation.mutate()}
@@ -1017,7 +1037,6 @@ export default function BatchesPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowEdit(false)}>Cancel</Button>
             <Button
               disabled={!editForm.name || !editForm.academicClassId || updateMutation.isPending}
               onClick={() => updateMutation.mutate()}
@@ -1051,7 +1070,6 @@ export default function BatchesPage() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowDelete(false)}>Cancel</Button>
             <Button
               variant="destructive"
               disabled={deleteMutation.isPending || !selectedBatch}

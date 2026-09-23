@@ -200,7 +200,6 @@ export function ManageCandidateBatchDialog({
               Clear assignment
             </Button>
           )}
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
             onClick={() => saveMutation.mutate()}
             disabled={saveMutation.isPending}

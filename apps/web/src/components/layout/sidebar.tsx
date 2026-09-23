@@ -12,6 +12,7 @@ import { Permission } from '@cbt/shared';
 import { Logo } from './logo';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
+import { useNavBadges } from '@/hooks/use-nav-badges';
 
 /** NCERT institute workflow — books → classes → syllabus → tests → students → results */
 export const mainNav = [
@@ -51,6 +52,7 @@ export function Sidebar({ className, onNavigate, compact = false }: SidebarProps
   const pathname = usePathname();
   const { can } = usePermissions();
   const { user } = useAuthStore();
+  const navBadges = useNavBadges();
   const teacherPortal = isTeacherOnly(normalizeRoles(user?.roles));
   const nav = teacherPortal ? teacherNav : mainNav;
   const showSettings = !teacherPortal && settingsNav.some((i) => can(i.permission));
@@ -68,13 +70,14 @@ export function Sidebar({ className, onNavigate, compact = false }: SidebarProps
     const isActive = item.exact
       ? pathname === item.href
       : pathname === item.href || pathname.startsWith(item.href + '/');
+    const badge = navBadges[item.href] ?? 0;
 
     return (
       <Link
         key={item.href}
         href={item.href}
         onClick={onNavigate}
-        title={item.label}
+        title={badge > 0 ? `${item.label} (${badge} notification${badge === 1 ? '' : 's'})` : item.label}
         className={cn(
           'group relative flex items-center font-medium transition-all duration-200',
           compact
@@ -96,7 +99,18 @@ export function Sidebar({ className, onNavigate, compact = false }: SidebarProps
             isActive ? 'text-white' : 'text-current group-hover:scale-110',
           )}
         />
-        {!compact && <span className="truncate">{item.label}</span>}
+        {!compact && <span className="min-w-0 flex-1 truncate">{item.label}</span>}
+        {badge > 0 && (
+          compact ? (
+            <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#FF5C5C] px-1 text-[9px] font-bold leading-none text-white ring-2 ring-sidebar">
+              {badge > 9 ? '9+' : badge}
+            </span>
+          ) : (
+            <span className="ml-auto flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-[#FF5C5C] px-1.5 text-[10px] font-bold tabular-nums text-white">
+              {badge > 99 ? '99+' : badge}
+            </span>
+          )
+        )}
         {!compact && isActive && (
           <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-white/90" />
         )}

@@ -1,19 +1,22 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
-import { getProctoringSocket } from '@/lib/socket';
+import { useState, useMemo } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { examsApi, proctoringApi } from '@/lib/api';
+import { proctoringApi } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { usePermissions } from '@/hooks/use-permissions';
 import { Permission } from '@cbt/shared';
 import { toast } from '@/hooks/use-toast';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatCard } from '@/components/layout/stat-card';
-import { Activity, AlertTriangle, Pause, Play, XCircle, Radio, Shield } from 'lucide-react';
+import { ExamSearchSelect } from '@/components/monitoring/exam-search-select';
+import { fetchAllExams } from '@/lib/fetch-all-exams';
+import { Activity, AlertTriangle, Pause, Play, XCircle, Monitor, Shield } from 'lucide-react';
+import { LiveSessionFeed } from '@/components/proctoring/live-session-feed';
 
 type LiveCandidate = {
   sessionId: string;
@@ -22,82 +25,79 @@ type LiveCandidate = {
   status: string;
   timeRemaining?: number;
   recentViolations: number;
+  lastActiveSecondsAgo?: number | null;
 };
 
-type RiskPatch = {
-  riskScore: number;
-  violations?: unknown[];
-};
+const FEED_STALE_SECONDS = 15;
+const CANDIDATE_OFFLINE_SECONDS = 90;
+
+function formatTimeRemaining(seconds?: number) {
+  if (seconds == null || seconds <= 0) return '0 min left';
+  const mins = Math.ceil(seconds / 60);
+  if (mins >= 120) {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h}h ${m}m left` : `${h}h left`;
+  }
+  return `${mins} min left`;
+}
+
+function resolveFeedState(
+  candidate: LiveCandidate,
+  feed?: { screen?: string; camera?: string; updatedAt?: string },
+): 'live' | 'waiting' | 'offline' {
+  if (feed?.screen || feed?.camera) {
+    if (feed.updatedAt) {
+      const ageMs = Date.now() - new Date(feed.updatedAt).getTime();
+      if (ageMs <= FEED_STALE_SECONDS * 1000) return 'live';
+    } else {
+      return 'live';
+    }
+  }
+  const idle = candidate.lastActiveSecondsAgo;
+  if (idle != null && idle >= CANDIDATE_OFFLINE_SECONDS) return 'offline';
+  return 'waiting';
+}
 
 export default function MonitoringPage() {
   const { accessToken } = useRequireAuth(true);
   const { can } = usePermissions();
   const queryClient = useQueryClient();
-  const [examId, setExamId] = useState('');
-  const [liveAlerts, setLiveAlerts] = useState<{ sessionId: string; type: string; severity: string; timestamp: string }[]>([]);
-  const [riskPatches, setRiskPatches] = useState<Record<string, RiskPatch>>({});
+  const searchParams = useSearchParams();
+  const initialExamId = searchParams.get('examId') ?? '';
+  const [examId, setExamId] = useState(initialExamId);
 
-  useEffect(() => {
-    setRiskPatches({});
-  }, [examId]);
-
-  useEffect(() => {
-    const socket = getProctoringSocket();
-    if (!socket) return;
-    socket.connect();
-    socket.emit('proctoring:join-monitoring');
-
-    const onViolation = (data: { sessionId: string; type: string; severity: string; timestamp: string }) => {
-      setLiveAlerts((prev) => [data, ...prev].slice(0, 20));
-      toast({ title: `Violation: ${data.type}`, description: `Severity: ${data.severity}`, variant: 'destructive' });
-    };
-
-    const onRiskUpdate = (data: { sessionId: string; riskScore: number; violations?: unknown[] }) => {
-      setRiskPatches((prev) => ({
-        ...prev,
-        [data.sessionId]: { riskScore: data.riskScore, violations: data.violations },
-      }));
-    };
-
-    socket.on('proctoring:violation', onViolation);
-    socket.on('proctoring:risk-update', onRiskUpdate);
-
-    return () => {
-      socket.off('proctoring:violation', onViolation);
-      socket.off('proctoring:risk-update', onRiskUpdate);
-    };
-  }, []);
-
-  const { data: exams } = useQuery({
-    queryKey: ['exams'],
-    queryFn: () => examsApi.list(accessToken!),
+  const { data: examList = [], isLoading: examsLoading } = useQuery({
+    queryKey: ['exams', 'all-for-monitoring'],
+    queryFn: () => fetchAllExams(accessToken!),
     enabled: !!accessToken,
+    staleTime: 60_000,
   });
 
-type LiveMonitoringData = {
-  activeCount: number;
-  candidates: LiveCandidate[];
-};
+  type LiveMonitoringData = {
+    activeCount: number;
+    proctoringEnabled?: boolean;
+    candidates: LiveCandidate[];
+  };
 
-  const { data: live } = useQuery({
+  const { data: live, isLoading: liveLoading, isError: liveError } = useQuery({
     queryKey: ['monitoring', examId],
     queryFn: () => proctoringApi.live(accessToken!, examId) as Promise<LiveMonitoringData>,
     enabled: !!accessToken && !!examId,
-    refetchInterval: 30000,
+    refetchInterval: examId ? 10_000 : false,
   });
 
-  const candidates = useMemo(() => {
-    const base = live?.candidates || [];
-    return base.map((c) => {
-      const patch = riskPatches[c.sessionId];
-      if (!patch) return c;
-      return {
-        ...c,
-        riskScore: patch.riskScore,
-        recentViolations: patch.violations?.length ?? c.recentViolations,
-      };
-    });
-  }, [live?.candidates, riskPatches]);
+  const { data: polledFeeds } = useQuery({
+    queryKey: ['monitoring-feeds', examId],
+    queryFn: () => proctoringApi.liveFeeds(accessToken!, examId),
+    enabled: !!accessToken && !!examId,
+    refetchInterval: examId ? 2_000 : false,
+  });
+
+  const sessionFeeds = useMemo(() => polledFeeds?.feeds ?? {}, [polledFeeds]);
+
+  const candidates = live?.candidates ?? [];
+  const screenFeedEnabled = live?.proctoringEnabled !== false;
 
   const interveneMutation = useMutation({
     mutationFn: ({ sessionId, type, message }: { sessionId: string; type: string; message?: string }) =>
@@ -110,16 +110,19 @@ type LiveMonitoringData = {
   });
 
   const highRisk = candidates.filter((c) => c.riskScore > 70).length;
+  const liveFeedCount = candidates.filter(
+    (c) => resolveFeedState(c, sessionFeeds[c.sessionId]) === 'live',
+  ).length;
 
   return (
     <div className="space-y-8">
-      <PageHeader title="Live Monitoring" highlight="Monitoring" description="Real-time candidate monitoring with AI risk detection and proctor controls" badge="Live">
-        <select className="form-select w-56" value={examId} onChange={(e) => setExamId(e.target.value)}>
-          <option value="">Select exam...</option>
-          {(exams?.items ?? []).filter((e) => e.status === 'PUBLISHED').map((e) => (
-            <option key={e.id} value={e.id}>{e.title}</option>
-          ))}
-        </select>
+      <PageHeader title="Live Monitoring" highlight="Monitoring" description="Real-time student monitoring with AI risk detection and proctor controls" badge="Live">
+        <ExamSearchSelect
+          exams={examList}
+          value={examId}
+          onChange={setExamId}
+          loading={examsLoading}
+        />
       </PageHeader>
 
       {!examId && (
@@ -129,20 +132,55 @@ type LiveMonitoringData = {
               <Shield className="h-8 w-8 text-primary" />
             </div>
             <h3 className="text-lg font-bold">Select an exam to begin monitoring</h3>
-            <p className="mt-2 max-w-sm text-sm text-muted-foreground">Choose a published exam from the dropdown above to view live candidate sessions.</p>
+            <p className="mt-2 max-w-sm text-sm text-muted-foreground">Choose an exam from the dropdown above to view live student sessions.</p>
           </CardContent>
         </Card>
       )}
 
-      {examId && live && (
+      {examId && liveLoading && (
+        <Card className="surface-card">
+          <CardContent className="py-16 text-center text-muted-foreground">Loading live sessions…</CardContent>
+        </Card>
+      )}
+
+      {examId && liveError && (
+        <Card className="surface-card border-destructive/30">
+          <CardContent className="py-16 text-center text-destructive">
+            Could not load monitoring data. Check that the API is running and your account has proctoring access for this exam.
+          </CardContent>
+        </Card>
+      )}
+
+      {examId && live && !liveLoading && (
         <>
+          {!screenFeedEnabled && (
+            <Card className="surface-card border-amber-500/30 bg-amber-500/5">
+              <CardContent className="py-4 text-sm text-muted-foreground">
+                <span className="font-semibold text-foreground">Screen sharing is off for this test.</span>{' '}
+                You can still see active sessions and integrity violations. New AI tests enable proctoring by default; create a new test or update this exam&apos;s security policy to require live screen feeds.
+              </CardContent>
+            </Card>
+          )}
           <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3">
-            <StatCard title="Active Sessions" value={live.activeCount} icon={Activity} accent="blue" trend="Real-time" trendUp />
+            <StatCard title="Active Sessions" value={live.activeCount} icon={Activity} accent="blue" trend="Refreshes every 10s" trendUp />
             <StatCard title="High Risk" value={highRisk} icon={AlertTriangle} accent="red" />
-            <StatCard title="Connection" value="Live" icon={Radio} accent="green" trend="WebSocket + REST" trendUp />
+            <StatCard
+              title="Live Feeds"
+              value={screenFeedEnabled ? liveFeedCount : '—'}
+              icon={Monitor}
+              accent="green"
+              trend={
+                !screenFeedEnabled
+                  ? 'Not enabled for this exam'
+                  : candidates.length
+                    ? `${liveFeedCount}/${candidates.length} streaming`
+                    : 'No sessions'
+              }
+              trendUp={screenFeedEnabled && liveFeedCount > 0}
+            />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {candidates.map((c) => (
               <Card key={c.sessionId} className={`surface-card transition-all duration-300 ${c.riskScore > 70 ? 'border-red-500/40 ring-1 ring-red-500/20' : ''}`}>
                 <CardHeader className="pb-3">
@@ -154,9 +192,15 @@ type LiveMonitoringData = {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4 text-sm">
+                  <LiveSessionFeed
+                    screenThumbnail={sessionFeeds[c.sessionId]?.screen}
+                    cameraThumbnail={sessionFeeds[c.sessionId]?.camera}
+                    feedState={resolveFeedState(c, sessionFeeds[c.sessionId])}
+                    screenFeedEnabled={screenFeedEnabled}
+                  />
                   <div className="flex justify-between rounded-lg bg-muted/40 px-3 py-2 text-muted-foreground">
                     <span>{c.status}</span>
-                    <span>{c.timeRemaining ? Math.floor(c.timeRemaining / 60) : 0} min left</span>
+                    <span>{formatTimeRemaining(c.timeRemaining)}</span>
                   </div>
                   <p className="text-muted-foreground">Violations: <span className="font-semibold text-foreground">{c.recentViolations}</span></p>
                   <div className="flex flex-wrap gap-2">
@@ -183,24 +227,6 @@ type LiveMonitoringData = {
           {!candidates.length && (
             <Card className="surface-card">
               <CardContent className="py-16 text-center text-muted-foreground">No active sessions for this exam.</CardContent>
-            </Card>
-          )}
-
-          {liveAlerts.length > 0 && (
-            <Card className="surface-card border-destructive/30">
-              <CardHeader className="border-b border-destructive/20">
-                <CardTitle className="flex items-center gap-2 text-base font-bold text-destructive">
-                  <AlertTriangle className="h-4 w-4" /> Live AI Alerts
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2 pt-4">
-                {liveAlerts.map((a, i) => (
-                  <div key={i} className="flex items-center justify-between rounded-xl border border-destructive/10 bg-destructive/5 px-4 py-3 text-sm">
-                    <span className="font-medium">{a.type} · Session {a.sessionId.slice(0, 8)}</span>
-                    <Badge variant="destructive">{a.severity}</Badge>
-                  </div>
-                ))}
-              </CardContent>
             </Card>
           )}
         </>

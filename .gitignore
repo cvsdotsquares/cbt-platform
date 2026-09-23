@@ -47,6 +47,7 @@ infra/docker/volumes/
 .cache/
 uploads/
 temp/
+apps/web/certificates/
 
 # Uploads
 *.tar.gz

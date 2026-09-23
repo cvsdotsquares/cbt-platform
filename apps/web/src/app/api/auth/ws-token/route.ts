@@ -2,9 +2,10 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { ACCESS_TOKEN_COOKIE, verifyAccessToken } from '@/lib/auth-cookies';
 
-export async function GET() {
-  const cookieStore = await cookies();
-  const accessToken = cookieStore.get(ACCESS_TOKEN_COOKIE)?.value;
+export async function GET(request: Request) {
+  const headerToken = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  const cookieToken = (await cookies()).get(ACCESS_TOKEN_COOKIE)?.value;
+  const accessToken = headerToken || cookieToken;
 
   if (!accessToken) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });

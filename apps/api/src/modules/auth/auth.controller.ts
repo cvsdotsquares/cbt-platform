@@ -16,6 +16,7 @@ import { AuthService } from './auth.service';
 import {
   LoginDto,
   RegisterDto,
+  ValidateInviteDto,
   MfaVerifyDto,
   RefreshTokenDto,
 } from './dto/auth.dto';
@@ -28,6 +29,15 @@ import { Request } from 'express';
 @Controller('auth')
 export class AuthController {
   constructor(private authService: AuthService) {}
+
+  @Public()
+  @Post('invite/validate')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60000, limit: 20 } })
+  @ApiOperation({ summary: 'Validate a student registration invite' })
+  validateInvite(@Body() dto: ValidateInviteDto) {
+    return this.authService.validateRegistrationInvite(dto.inviteCode);
+  }
 
   @Public()
   @Post('register')

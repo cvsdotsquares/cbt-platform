@@ -1,14 +1,21 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { resultsApi, type ResultReviewQuestion } from '@/lib/api';
+import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
-import { CheckCircle2, CircleHelp, XCircle } from 'lucide-react';
+import { CheckCircle2, CircleHelp, Loader2, Pencil, XCircle } from 'lucide-react';
+
+const MANUAL_GRADE_TYPES = new Set([
+  'SUBJECTIVE', 'CASE_STUDY', 'CODING', 'AUDIO', 'VIDEO', 'MSQ',
+]);
 
 type AnswerReviewDialogProps = {
   open: boolean;
@@ -17,9 +24,24 @@ type AnswerReviewDialogProps = {
   onClose: () => void;
   /** When true, show candidate name in the header (staff view). */
   showCandidateName?: boolean;
+  /** Allow teachers to override auto-grades for open-ended questions. */
+  manualGradingEnabled?: boolean;
   /** Label for the candidate's selection in option lists. */
   markedAnswerLabel?: string;
+  /** Called after a manual grade updates totals (e.g. refresh results table). */
+  onGraded?: () => void;
 };
+
+function formatMarksAwarded(q: ResultReviewQuestion): string {
+  if (q.marksAwarded != null) {
+    const n = q.marksAwarded;
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
+  }
+  if (!q.answered) return '0';
+  if (q.isCorrect === true) return String(q.maxMarks);
+  if (q.isCorrect === false) return '0';
+  return '—';
+}
 
 function statusFor(q: ResultReviewQuestion): {
   label: string;
@@ -33,9 +55,120 @@ function statusFor(q: ResultReviewQuestion): {
     return { label: 'Correct', variant: 'success', Icon: CheckCircle2 };
   }
   if (q.isCorrect === false) {
+    if (
+      q.marksAwarded != null
+      && q.marksAwarded > 0
+      && q.marksAwarded < q.maxMarks
+    ) {
+      return { label: 'Partial credit', variant: 'warning', Icon: CircleHelp };
+    }
     return { label: 'Incorrect', variant: 'destructive', Icon: XCircle };
   }
+  if (
+    q.marksAwarded != null
+    && q.answered
+    && q.isCorrect == null
+    && q.marksAwarded > 0
+  ) {
+    return { label: 'Partial credit', variant: 'warning', Icon: CircleHelp };
+  }
   return { label: 'Graded', variant: 'warning', Icon: CircleHelp };
+}
+
+function ManualGradePanel({
+  question,
+  sessionId,
+  accessToken,
+  onSaved,
+}: {
+  question: ResultReviewQuestion;
+  sessionId: string;
+  accessToken: string;
+  onSaved: () => void;
+}) {
+  const initial = question.marksAwarded ?? (question.isCorrect ? question.maxMarks : 0);
+  const [marksInput, setMarksInput] = useState(String(initial));
+
+  const mutation = useMutation({
+    mutationFn: (marks: number) =>
+      resultsApi.grade(accessToken, sessionId, question.questionId, marks),
+    onSuccess: () => {
+      toast({ title: 'Marks updated', description: 'Score and result totals have been recalculated.' });
+      onSaved();
+    },
+    onError: (e) => {
+      toast({
+        title: 'Could not save marks',
+        description: e instanceof Error ? e.message : 'Try again',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  const applyMarks = (marks: number) => {
+    const clamped = Math.min(question.maxMarks, Math.max(0, marks));
+    setMarksInput(String(clamped));
+    mutation.mutate(clamped);
+  };
+
+  const parseInput = (): number | null => {
+    const n = Number.parseFloat(marksInput);
+    if (!Number.isFinite(n)) return null;
+    return Math.min(question.maxMarks, Math.max(0, n));
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-dashed border-primary/30 bg-primary/[0.03] p-3">
+      <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+        <Pencil className="h-3.5 w-3.5 text-primary" />
+        Manual grading
+      </div>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+        Override auto-grading for partial credit (e.g. MSQ with some correct options) or when open-ended keyword matching was too strict.
+      </p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          <Input
+            type="number"
+            min={0}
+            max={question.maxMarks}
+            step={0.5}
+            className="h-9 w-24 tabular-nums"
+            value={marksInput}
+            onChange={(e) => setMarksInput(e.target.value)}
+            disabled={mutation.isPending}
+          />
+          <span className="text-xs text-muted-foreground">/ {question.maxMarks}</span>
+        </div>
+        <Button
+          size="sm"
+          disabled={mutation.isPending || parseInput() == null}
+          onClick={() => {
+            const m = parseInput();
+            if (m != null) applyMarks(m);
+          }}
+        >
+          {mutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Save marks'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={mutation.isPending}
+          onClick={() => applyMarks(question.maxMarks)}
+        >
+          Full marks
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={mutation.isPending}
+          onClick={() => applyMarks(0)}
+        >
+          Zero
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 export function AnswerReviewDialog({
@@ -44,13 +177,24 @@ export function AnswerReviewDialog({
   accessToken,
   onClose,
   showCandidateName = false,
+  manualGradingEnabled = false,
   markedAnswerLabel = 'your answer',
+  onGraded,
 }: AnswerReviewDialogProps) {
+  const queryClient = useQueryClient();
+
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['result-review', resultId],
     queryFn: () => resultsApi.review(accessToken!, resultId!),
     enabled: open && !!accessToken && !!resultId,
   });
+
+  const refreshReview = () => {
+    if (resultId) {
+      void queryClient.invalidateQueries({ queryKey: ['result-review', resultId] });
+    }
+    onGraded?.();
+  };
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
@@ -65,12 +209,17 @@ export function AnswerReviewDialog({
                     {data.examTitle}
                     {showCandidateName ? ` · ${data.candidateName}` : ''}
                     {' · '}
-                    {data.totalScore}/{data.maxScore} ({data.percentage.toFixed(1)}%)
+                    {data.totalScore}/{data.maxScore} ({Number.isInteger(data.percentage) ? data.percentage : data.percentage.toFixed(1)}%)
                   </>
                 )
                 : 'Compare marked answers with the correct answers.'}
             </DialogDescription>
           </DialogHeader>
+          {manualGradingEnabled && data?.sessionId && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              MSQ and open-ended questions can be manually re-scored below; totals update immediately.
+            </p>
+          )}
         </div>
 
         <div className="max-h-[calc(85vh-8rem)] overflow-y-auto px-5 py-4 sm:px-6">
@@ -87,6 +236,13 @@ export function AnswerReviewDialog({
               {data.questions.map((q) => {
                 const status = statusFor(q);
                 const optionEntries = Object.entries(q.options);
+                const canManualGrade =
+                  manualGradingEnabled
+                  && !!data.sessionId
+                  && !!accessToken
+                  && q.answered
+                  && MANUAL_GRADE_TYPES.has((q.type || '').toUpperCase());
+
                 return (
                   <li
                     key={q.questionId}
@@ -108,7 +264,7 @@ export function AnswerReviewDialog({
                           {status.label}
                         </Badge>
                         <span className="text-xs tabular-nums text-muted-foreground">
-                          {q.marksAwarded != null ? q.marksAwarded : '—'}/{q.maxMarks}
+                          {formatMarksAwarded(q)}/{q.maxMarks}
                         </span>
                       </div>
                     </div>
@@ -160,6 +316,16 @@ export function AnswerReviewDialog({
                       </div>
                     )}
 
+                    {canManualGrade && (
+                      <ManualGradePanel
+                        key={`${q.questionId}-${formatMarksAwarded(q)}`}
+                        question={q}
+                        sessionId={data.sessionId!}
+                        accessToken={accessToken!}
+                        onSaved={refreshReview}
+                      />
+                    )}
+
                     {q.explanation && (
                       <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
                         <span className="font-semibold text-foreground">Explanation: </span>
@@ -173,11 +339,6 @@ export function AnswerReviewDialog({
           )}
         </div>
 
-        <div className="border-t border-border/60 px-5 py-3 sm:px-6">
-          <Button variant="outline" className="w-full sm:w-auto" onClick={onClose}>
-            Close
-          </Button>
-        </div>
       </DialogContent>
     </Dialog>
   );

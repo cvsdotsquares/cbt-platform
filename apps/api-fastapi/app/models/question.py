@@ -8,7 +8,7 @@ from sqlalchemy import ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin
+from app.models.base import Base, TimestampMixin, UuidStr
 from app.models.question_version import QuestionVersion
 
 if TYPE_CHECKING:
@@ -32,13 +32,13 @@ class Question(TimestampMixin, Base):
     __tablename__ = "questions"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         primary_key=True,
         default=uuid.uuid4,
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         ForeignKey("tenants.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -57,14 +57,14 @@ class Question(TimestampMixin, Base):
     )
 
     topic_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         ForeignKey("topics.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
 
     syllabus_topic_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         nullable=True,
     )
 
@@ -87,12 +87,12 @@ class Question(TimestampMixin, Base):
     )
 
     current_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         nullable=True,
     )
 
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
@@ -134,7 +134,7 @@ class Question(TimestampMixin, Base):
         back_populates="question",
         foreign_keys="[ExamQuestion.question_id]",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="noload",
     )
 
     def __repr__(self) -> str:

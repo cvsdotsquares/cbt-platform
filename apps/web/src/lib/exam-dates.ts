@@ -1,5 +1,7 @@
 import { DEFAULT_EXAM_TIMEZONE } from '@cbt/shared';
 
+export { utcIsoToLocalDateTimeInput } from '@cbt/shared';
+
 /** Friendly abbreviations for common exam timezones (avoids "GMT+5:30" in UI). */
 const TIMEZONE_LABELS: Record<string, string> = {
   UTC: 'UTC',
@@ -108,25 +110,5 @@ export function formatExamTimeRange(
     return `${formatExamDateTime(startIso, tz, { includeTimezone: false })} – ${formatExamDateTime(endIso, tz)}`;
   } catch {
     return `${new Date(startIso).toLocaleString()} – ${new Date(endIso).toLocaleString()}`;
-  }
-}
-
-/** Convert UTC ISO to `datetime-local` input value in the exam timezone. */
-export function utcIsoToLocalDateTimeInput(iso: string, timezone = DEFAULT_EXAM_TIMEZONE): string {
-  try {
-    const date = new Date(iso);
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).formatToParts(date);
-    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
-    return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
-  } catch {
-    return '';
   }
 }

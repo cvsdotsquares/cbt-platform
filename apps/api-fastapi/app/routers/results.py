@@ -1,16 +1,32 @@
+import csv
+import io
 import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.candidate_context import parse_json, require_candidate_id
-from app.services.exam_engine import evaluate_session
+from app.services.exam_engine import evaluate_session, grade_session_responses
+from app.services.subjective_grading import grade_subjective_answer
 
 router = APIRouter(prefix="/results", tags=["Results"])
+
+MANUAL_GRADE_TYPES = frozenset({
+    "SUBJECTIVE", "CASE_STUDY", "CODING", "AUDIO", "VIDEO", "MSQ",
+})
+
+
+class ManualGradeBody(BaseModel):
+    marks_awarded: float = Field(alias="marksAwarded")
+
+    model_config = {"populate_by_name": True}
+
 
 RESULT_STAFF_ROLES = {
     "SUPER_ADMIN",
@@ -60,6 +76,24 @@ def _format_answer_label(keys: list[str], options: dict[str, str]) -> str:
         else:
             parts.append(key)
     return ", ".join(parts)
+
+
+def _effective_marks_awarded(
+    marks_awarded: float | None,
+    *,
+    answered: bool,
+    is_correct: bool | None,
+    max_marks: float,
+) -> float | None:
+    if marks_awarded is not None:
+        return float(marks_awarded)
+    if not answered:
+        return 0.0
+    if is_correct is True:
+        return max_marks
+    if is_correct is False:
+        return 0.0
+    return None
 
 
 def _infer_is_correct(question_type: str, given: list[str], expected: list[str]) -> bool | None:
@@ -268,6 +302,53 @@ async def exam_results(
     }
 
 
+@router.get("/exam/{exam_id}/export", response_class=PlainTextResponse)
+async def export_exam_results(
+    exam_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await _assert_exam(db, exam_id, current_user.tenant_id)
+    await _backfill_missing_results(db, exam_id)
+
+    rows = await db.execute(
+        text(
+            """
+            SELECT er.rank, er.total_score, er.max_score, er.percentage,
+                   er.published, er.evaluation_status,
+                   u.first_name, u.last_name, u.email
+            FROM exam_results er
+            JOIN candidates c ON c.id = er.candidate_id
+            JOIN users u ON u.id = c.user_id
+            WHERE er.exam_id = :exam_id
+            ORDER BY er.rank ASC NULLS LAST, er.total_score DESC, er.created_at ASC
+            """
+        ),
+        {"exam_id": exam_id},
+    )
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["Rank", "Candidate Name", "Email", "Score", "Max Score", "Percentage", "Status", "Published"])
+    for row in rows.mappings():
+        writer.writerow([
+            row["rank"] if row["rank"] is not None else "",
+            f"{row['first_name'] or ''} {row['last_name'] or ''}".strip(),
+            row["email"] or "",
+            row["total_score"] or 0,
+            row["max_score"] or 0,
+            f"{float(row['percentage'] or 0):.2f}",
+            row["evaluation_status"] or "",
+            "Yes" if row["published"] else "No",
+        ])
+
+    return PlainTextResponse(
+        output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="results-{exam_id}.csv"'},
+    )
+
+
 @router.get("/exam/{exam_id}/subjective")
 async def exam_subjective(
     exam_id: str,
@@ -276,6 +357,82 @@ async def exam_subjective(
 ):
     await _assert_exam(db, exam_id, current_user.tenant_id)
     return []
+
+
+@router.patch("/grade/{session_id}/{question_id}")
+async def grade_response(
+    session_id: str,
+    question_id: str,
+    body: ManualGradeBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("result:evaluate")),
+):
+    session_row = await db.execute(
+        text(
+            """
+            SELECT es.id, e.tenant_id
+            FROM exam_sessions es
+            JOIN exams e ON e.id::text = es.exam_id::text
+            WHERE es.id::text = :session_id
+            """
+        ),
+        {"session_id": str(session_id)},
+    )
+    session = session_row.mappings().first()
+    if not session or str(session["tenant_id"]) != str(current_user.tenant_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    response_row = await db.execute(
+        text(
+            """
+            SELECT sr.id, q.type, eq.marks, qv.marks AS version_marks
+            FROM session_responses sr
+            JOIN questions q ON q.id::text = sr.question_id::text
+            JOIN exam_sessions es ON es.id::text = sr.session_id::text
+            JOIN exam_questions eq
+              ON eq.question_id::text = sr.question_id::text
+             AND eq.exam_id::text = es.exam_id::text
+            LEFT JOIN question_versions qv ON qv.id::text = q.current_version_id::text
+            WHERE sr.session_id::text = :session_id AND sr.question_id::text = :question_id
+            """
+        ),
+        {"session_id": str(session_id), "question_id": str(question_id)},
+    )
+    response = response_row.mappings().first()
+    if not response:
+        raise HTTPException(status_code=404, detail="Response not found")
+
+    qtype = (response["type"] or "MCQ").upper()
+    if qtype not in MANUAL_GRADE_TYPES:
+        raise HTTPException(status_code=400, detail="This question type cannot be manually graded")
+
+    max_marks = float(response["version_marks"] or response["marks"] or 0)
+    marks_awarded = float(body.marks_awarded)
+    if marks_awarded < 0 or marks_awarded > max_marks:
+        raise HTTPException(status_code=400, detail=f"Marks must be between 0 and {max_marks}")
+
+    is_correct = marks_awarded >= max_marks if max_marks > 0 else False
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text(
+            """
+            UPDATE session_responses
+            SET marks_awarded = :marks, is_correct = :is_correct, updated_at = :now
+            WHERE session_id::text = :session_id AND question_id::text = :question_id
+            """
+        ),
+        {
+            "marks": marks_awarded,
+            "is_correct": is_correct,
+            "now": now,
+            "session_id": str(session_id),
+            "question_id": str(question_id),
+        },
+    )
+    await db.commit()
+    return await evaluate_session(db, session_id)
 
 
 async def _rank_exam_results(db: AsyncSession, exam_id: str) -> int:
@@ -401,6 +558,26 @@ async def result_review(
     elif not is_staff:
         raise HTTPException(status_code=403, detail="You cannot view this result")
 
+    total_score, max_score = await grade_session_responses(
+        db, str(result["session_id"]), str(result["exam_id"])
+    )
+    percentage = (total_score / max_score * 100) if max_score > 0 else 0.0
+    await db.execute(
+        text(
+            """
+            UPDATE exam_results
+            SET total_score = :total, max_score = :max, percentage = :pct, updated_at = NOW()
+            WHERE id::text = :result_id
+            """
+        ),
+        {
+            "total": total_score,
+            "max": max_score,
+            "pct": percentage,
+            "result_id": str(result_id),
+        },
+    )
+
     responses_result = await db.execute(
         text(
             """
@@ -441,8 +618,35 @@ async def result_review(
         correct_answer = _normalize_answer(eq["correct_answer"])
         candidate_answer = _normalize_answer(response["answer"] if response else None)
         is_correct = response["is_correct"] if response and response["is_correct"] is not None else None
+        answered = len(candidate_answer) > 0
+        max_marks = float(eq["version_marks"] or eq["marks"] or 0)
+        qtype = (eq["type"] or "MCQ").upper()
+
+        raw_marks = (
+            float(response["marks_awarded"])
+            if response and response["marks_awarded"] is not None
+            else None
+        )
+
+        if qtype in {"SUBJECTIVE", "CASE_STUDY"} and answered and raw_marks is None:
+            inferred_correct, inferred_marks = grade_subjective_answer(
+                " ".join(candidate_answer),
+                parse_json(eq["correct_answer"]),
+                max_marks,
+            )
+            if inferred_marks is not None:
+                is_correct = inferred_correct
+                raw_marks = inferred_marks
+
         if is_correct is None:
             is_correct = _infer_is_correct(eq["type"], candidate_answer, correct_answer)
+
+        marks_awarded = _effective_marks_awarded(
+            raw_marks,
+            answered=answered,
+            is_correct=is_correct,
+            max_marks=max_marks,
+        )
 
         questions.append(
             {
@@ -458,23 +662,22 @@ async def result_review(
                 "correctAnswer": correct_answer,
                 "correctAnswerLabel": _format_answer_label(correct_answer, options),
                 "isCorrect": is_correct,
-                "marksAwarded": float(response["marks_awarded"])
-                if response and response["marks_awarded"] is not None
-                else None,
-                "maxMarks": float(eq["version_marks"] or eq["marks"] or 0),
+                "marksAwarded": marks_awarded,
+                "maxMarks": max_marks,
                 "explanation": eq["explanation"],
-                "answered": len(candidate_answer) > 0,
+                "answered": answered,
             }
         )
 
     return {
         "resultId": result["id"],
+        "sessionId": str(result["session_id"]),
         "examTitle": result["exam_title"],
         "examCode": result["exam_code"],
         "candidateName": f"{result['first_name'] or ''} {result['last_name'] or ''}".strip(),
-        "totalScore": float(result["total_score"] or 0),
-        "maxScore": float(result["max_score"] or 0),
-        "percentage": float(result["percentage"] or 0),
+        "totalScore": total_score,
+        "maxScore": max_score,
+        "percentage": percentage,
         "published": bool(result["published"]),
         "questions": questions,
     }
@@ -525,6 +728,13 @@ async def my_certificate(
         candidate_id=candidate_id,
         published_only=True,
     )
+    passing_score = _passing_score(result.get("exam_settings"))
+    percentage = float(result.get("percentage") or 0)
+    if percentage < passing_score:
+        raise HTTPException(
+            status_code=403,
+            detail="Certificates are only available when you meet the exam pass score",
+        )
     total_candidates = int(
         (
             await db.execute(

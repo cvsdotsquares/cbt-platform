@@ -31,6 +31,7 @@ model Tenant {
   batches         Batch[]
   studyMaterials  StudyMaterial[]
   academicClasses AcademicClass[]
+  registrationInvites RegistrationInvite[]
 
   @@map("tenants")
 }
@@ -675,6 +676,27 @@ model PasswordResetToken {
   @@map("password_reset_tokens")
 }
 
+model RegistrationInvite {
+  id                 String    @id @default(uuid())
+  tenantId           String    @map("tenant_id")
+  email              String
+  tokenHash          String    @map("token_hash")
+  firstName          String?   @map("first_name")
+  lastName           String?   @map("last_name")
+  batchId            String?   @map("batch_id")
+  registrationNumber String?   @map("registration_number")
+  expiresAt          DateTime  @map("expires_at")
+  usedAt             DateTime? @map("used_at")
+  createdById        String?   @map("created_by_id")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  batch              Batch?    @relation(fields: [batchId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, email])
+  @@index([tokenHash])
+  @@map("registration_invites")
+}
+
 // ─── Curriculum (NCERT Syllabus) ────────────────────────────────
 
 model AcademicClass {
@@ -794,6 +816,7 @@ model Batch {
   syllabusProgress SyllabusProgress[]
   teacherAssignments TeacherAssignment[]
   aiTestConfigs   AiTestConfig[]
+  registrationInvites RegistrationInvite[]
 
   @@unique([tenantId, name, academicYear, academicClassId])
   @@index([tenantId, isActive])

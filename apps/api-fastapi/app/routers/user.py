@@ -9,12 +9,14 @@ from typing import NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import (
     get_current_user,
     hash_password,
+    require_permission,
 )
 from app.models.user import User
 from app.models.user_role import UserRole
@@ -22,6 +24,23 @@ from app.models.user_role import UserRole
 router = APIRouter(prefix="/users", tags=["Users"])
 
 STUDENT_ROLES = ("CANDIDATE", "STUDENT")
+ASSIGNABLE_STAFF_ROLES = ("SUPER_ADMIN", "TEACHER")
+
+_STAFF_ROLE_EXISTS = """
+EXISTS (
+  SELECT 1 FROM user_roles ur
+  JOIN roles r ON r.id = ur.role_id
+  WHERE ur.user_id = u.id AND r.name NOT IN ('CANDIDATE', 'STUDENT')
+)
+"""
+
+_SUPER_ADMIN_ROLE_EXISTS = """
+EXISTS (
+  SELECT 1 FROM user_roles ur
+  JOIN roles r ON r.id = ur.role_id
+  WHERE ur.user_id = u.id AND r.name = 'SUPER_ADMIN'
+)
+"""
 
 
 def _tenant_id(current_user: User) -> str:
@@ -60,6 +79,11 @@ def _assert_staff_role_names(names: list[str]) -> None:
         raise HTTPException(
             status_code=400,
             detail="Student/candidate roles are managed from the Students page",
+        )
+    if any(name not in ASSIGNABLE_STAFF_ROLES for name in names):
+        raise HTTPException(
+            status_code=400,
+            detail="Only SUPER_ADMIN and TEACHER roles can be assigned",
         )
 
 
@@ -163,6 +187,146 @@ async def _get_staff_user_row(
     return dict(row) if row else None
 
 
+async def _list_inactive_staff_user_ids(
+    db: AsyncSession,
+    tenant_id: str,
+    *,
+    exclude_user_id: str | None = None,
+) -> list[str]:
+    params: dict = {"tenant_id": tenant_id}
+    exclude_clause = ""
+    if exclude_user_id:
+        exclude_clause = " AND u.id != :exclude_user_id"
+        params["exclude_user_id"] = exclude_user_id
+
+    rows = await db.execute(
+        text(
+            f"""
+            SELECT u.id
+            FROM users u
+            WHERE u.tenant_id = :tenant_id
+              AND u.status != 'ACTIVE'
+              {exclude_clause}
+              AND NOT EXISTS (
+                SELECT 1 FROM candidates c WHERE c.user_id = u.id
+              )
+              AND {_STAFF_ROLE_EXISTS.strip()}
+              AND NOT ({_SUPER_ADMIN_ROLE_EXISTS.strip()})
+            """
+        ),
+        params,
+    )
+    return [str(row[0]) for row in rows.all()]
+
+
+async def _tenant_fallback_user_id(
+    db: AsyncSession, tenant_id: str, *, exclude_user_ids: list[str]
+) -> str | None:
+    row = await db.execute(
+        text(
+            """
+            SELECT u.id
+            FROM users u
+            WHERE u.tenant_id = :tenant_id
+              AND u.status = 'ACTIVE'
+              AND u.id != ALL(:exclude_user_ids)
+              AND EXISTS (
+                SELECT 1 FROM user_roles ur
+                JOIN roles r ON r.id = ur.role_id
+                WHERE ur.user_id = u.id AND r.name = 'SUPER_ADMIN'
+              )
+            ORDER BY u.created_at ASC
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "exclude_user_ids": exclude_user_ids or [""]},
+    )
+    found = row.scalar_one_or_none()
+    if found:
+        return str(found)
+
+    row = await db.execute(
+        text(
+            """
+            SELECT u.id
+            FROM users u
+            WHERE u.tenant_id = :tenant_id
+              AND u.status = 'ACTIVE'
+              AND u.id != ALL(:exclude_user_ids)
+              AND EXISTS (
+                SELECT 1 FROM user_roles ur
+                JOIN roles r ON r.id = ur.role_id
+                WHERE ur.user_id = u.id AND r.name NOT IN ('CANDIDATE', 'STUDENT')
+              )
+            ORDER BY u.created_at ASC
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "exclude_user_ids": exclude_user_ids or [""]},
+    )
+    found = row.scalar_one_or_none()
+    return str(found) if found else None
+
+
+async def _clear_user_references(
+    db: AsyncSession, user_ids: list[str], tenant_id: str
+) -> None:
+    """Reassign or null FKs so user rows can be removed."""
+    if not user_ids:
+        return
+
+    fallback = await _tenant_fallback_user_id(
+        db, tenant_id, exclude_user_ids=user_ids
+    )
+    params: dict = {"user_ids": user_ids}
+    if fallback:
+        params["fallback"] = fallback
+        await db.execute(
+            text(
+                """
+                UPDATE questions
+                SET created_by_id = :fallback
+                WHERE created_by_id::text = ANY(:user_ids)
+                """
+            ),
+            params,
+        )
+
+    for stmt in (
+        "UPDATE question_versions SET approved_by_id = NULL WHERE approved_by_id::text = ANY(:user_ids)",
+        "UPDATE exams SET created_by_id = NULL WHERE created_by_id::text = ANY(:user_ids)",
+        "UPDATE syllabus_progress SET updated_by_id = NULL WHERE updated_by_id = ANY(:user_ids)",
+        "UPDATE registration_invites SET created_by_id = NULL WHERE created_by_id = ANY(:user_ids)",
+        "UPDATE user_roles SET assigned_by = NULL WHERE assigned_by = ANY(:user_ids)",
+    ):
+        await db.execute(text(stmt), params)
+
+
+async def _hard_delete_users(
+    db: AsyncSession, user_ids: list[str], tenant_id: str
+) -> int:
+    if not user_ids:
+        return 0
+
+    await _clear_user_references(db, user_ids, tenant_id)
+    await db.execute(
+        text("DELETE FROM teacher_assignments WHERE user_id = ANY(:user_ids)"),
+        {"user_ids": user_ids},
+    )
+    result = await db.execute(
+        text(
+            """
+            DELETE FROM users
+            WHERE id = ANY(:user_ids) AND tenant_id = :tenant_id
+            RETURNING id
+            """
+        ),
+        {"user_ids": user_ids, "tenant_id": tenant_id},
+    )
+    await db.flush()
+    return len(result.all())
+
+
 @router.get("/me")
 async def get_me(current_user: User = Depends(get_current_user)):
     roles = [
@@ -196,7 +360,7 @@ async def list_assignable_roles(
             """
             SELECT id, name, description
             FROM roles
-            WHERE name NOT IN ('CANDIDATE', 'STUDENT')
+            WHERE name IN ('SUPER_ADMIN', 'TEACHER')
             ORDER BY name ASC
             """
         )
@@ -207,11 +371,55 @@ async def list_assignable_roles(
     return roles
 
 
+@router.get("/meta/inactive-count")
+async def inactive_staff_count(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    tenant_id = _tenant_id(current_user)
+    ids = await _list_inactive_staff_user_ids(
+        db, tenant_id, exclude_user_id=str(current_user.id)
+    )
+    return {"count": len(ids)}
+
+
+@router.delete("/inactive")
+async def purge_inactive_staff_users(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("user:delete")),
+):
+    tenant_id = _tenant_id(current_user)
+    user_ids = await _list_inactive_staff_user_ids(
+        db, tenant_id, exclude_user_id=str(current_user.id)
+    )
+    if not user_ids:
+        return {"deleted": 0, "ids": []}
+
+    deleted_ids: list[str] = []
+    for user_id in user_ids:
+        try:
+            count = await _hard_delete_users(db, [user_id], tenant_id)
+            if count:
+                deleted_ids.append(user_id)
+        except IntegrityError:
+            continue
+
+    skipped = len(user_ids) - len(deleted_ids)
+    if skipped and not deleted_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not remove inactive accounts because they are still linked to other records.",
+        )
+
+    return {"deleted": len(deleted_ids), "ids": deleted_ids, "skipped": skipped}
+
+
 @router.get("")
 async def list_users(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     search: str = Query(""),
+    include_inactive: bool = Query(False, alias="includeInactive"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -221,14 +429,10 @@ async def list_users(
 
     filters = [
         "u.tenant_id = :tenant_id",
-        """
-        EXISTS (
-          SELECT 1 FROM user_roles ur
-          JOIN roles r ON r.id = ur.role_id
-          WHERE ur.user_id = u.id AND r.name NOT IN ('CANDIDATE', 'STUDENT')
-        )
-        """,
+        _STAFF_ROLE_EXISTS.strip(),
     ]
+    if not include_inactive:
+        filters.append("u.status = 'ACTIVE'")
     if search.strip():
         params["search"] = f"%{search.strip().lower()}%"
         filters.append(
@@ -484,29 +688,42 @@ async def update_user(
 async def delete_user(
     user_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("user:delete")),
 ):
     tenant_id = _tenant_id(current_user)
     if user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
 
     row = await _get_staff_user_row(db, user_id, tenant_id)
     if not row:
         raise HTTPException(status_code=404, detail="User not found")
 
-    now = datetime.now(timezone.utc)
-    await db.execute(text("DELETE FROM sessions WHERE user_id = :user_id"), {"user_id": user_id})
-    await db.execute(
-        text(
-            """
-            UPDATE users
-            SET status = 'INACTIVE', is_active = false, updated_at = :now
-            WHERE id = :user_id AND tenant_id = :tenant_id
-            """
-        ),
-        {"now": now, "user_id": user_id, "tenant_id": tenant_id},
+    roles = (await _load_user_roles(db, [user_id])).get(user_id, [])
+    if any(r["role"]["name"] == "SUPER_ADMIN" for r in roles):
+        raise HTTPException(status_code=400, detail="Cannot delete a super admin account")
+
+    candidate_row = await db.execute(
+        text("SELECT id FROM candidates WHERE user_id = :user_id LIMIT 1"),
+        {"user_id": user_id},
     )
-    return {"deactivated": True, "id": user_id}
+    if candidate_row.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail="This user is a student account. Remove them from the Students page instead.",
+        )
+
+    try:
+        deleted_count = await _hard_delete_users(db, [user_id], tenant_id)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete this user because they are still linked to other records.",
+        ) from exc
+
+    if not deleted_count:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {"deleted": True, "id": user_id}
 
 
 @router.post("/{user_id}/roles", status_code=status.HTTP_201_CREATED)

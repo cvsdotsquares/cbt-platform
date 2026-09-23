@@ -11,6 +11,7 @@ import {
   MessageBody,
 
   OnGatewayConnection,
+  OnGatewayInit,
 
 } from '@nestjs/websockets';
 
@@ -23,6 +24,7 @@ import { AiService } from '../modules/ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 import { WsAuthService } from '../common/utils/ws-auth.service';
+import { WsBroadcastService } from '../common/ws/ws-broadcast.service';
 import { isOriginAllowed } from '../common/utils/cors-origins';
 import { Permission } from '@cbt/shared';
 
@@ -36,7 +38,7 @@ import { Permission } from '@cbt/shared';
   },
 })
 
-export class ProctoringGateway implements OnGatewayConnection {
+export class ProctoringGateway implements OnGatewayConnection, OnGatewayInit {
 
   @WebSocketServer()
 
@@ -54,7 +56,13 @@ export class ProctoringGateway implements OnGatewayConnection {
 
     private wsAuth: WsAuthService,
 
+    private wsBroadcast: WsBroadcastService,
+
   ) {}
+
+  afterInit() {
+    this.wsBroadcast.registerProctoring(this.server);
+  }
 
 
 
@@ -90,7 +98,25 @@ export class ProctoringGateway implements OnGatewayConnection {
 
   }
 
+  @SubscribeMessage('proctoring:join-session')
+  async handleJoinSession(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { sessionId: string },
+  ) {
+    const user = this.wsAuth.requireAuth(client);
+    if (!user) return;
 
+    const session = await this.prisma.examSession.findUnique({
+      where: { id: data.sessionId },
+      include: { candidate: { select: { userId: true } } },
+    });
+    if (!session || session.candidate.userId !== user.sub) {
+      return { event: 'proctoring:error', data: { message: 'Invalid session' } };
+    }
+
+    client.join(`tenant:${user.tenantId}:session:${data.sessionId}`);
+    return { event: 'proctoring:session-joined', data: { sessionId: data.sessionId } };
+  }
 
   @SubscribeMessage('proctoring:frame')
 
@@ -112,7 +138,7 @@ export class ProctoringGateway implements OnGatewayConnection {
 
       where: { id: data.sessionId },
 
-      include: { exam: { select: { tenantId: true } }, candidate: { select: { userId: true } } },
+      include: { exam: { select: { tenantId: true, id: true } }, candidate: { select: { userId: true } } },
 
     });
 
@@ -134,6 +160,8 @@ export class ProctoringGateway implements OnGatewayConnection {
 
       sessionId: data.sessionId,
 
+      examId: session.exam.id,
+
       riskScore: analysis.riskScore,
 
       faceDetected: analysis.faceDetected,
@@ -143,8 +171,6 @@ export class ProctoringGateway implements OnGatewayConnection {
       timestamp: new Date().toISOString(),
 
     });
-
-
 
     return {
 
@@ -215,26 +241,6 @@ export class ProctoringGateway implements OnGatewayConnection {
       { severity: (severityMap[data.type] || 'LOW') as never, metadata: data.metadata },
 
     );
-
-
-
-    if (event.severity === 'HIGH' || event.severity === 'CRITICAL') {
-
-      this.server.to(`tenant:${session.exam.tenantId}:monitoring`).emit('proctoring:violation', {
-
-        sessionId: data.sessionId,
-
-        type: data.type,
-
-        severity: event.severity,
-
-        timestamp: new Date().toISOString(),
-
-      });
-
-    }
-
-
 
     return { event: 'proctoring:event-recorded', data: { id: event.id } };
 

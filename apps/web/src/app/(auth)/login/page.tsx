@@ -9,10 +9,12 @@ import { Label } from '@/components/ui/label';
 import { authApi } from '@/lib/api';
 import { useAuthStore } from '@/stores/auth-store';
 import { normalizeRoles } from '@/lib/roles';
+import { redirectAfterLogin } from '@/lib/auth-session';
 import { getSafeRedirectPath } from '@/lib/safe-redirect';
 import { Logo } from '@/components/layout/logo';
 import { ThemeToggle } from '@/components/layout/theme-toggle';
 import { Eye, EyeOff } from 'lucide-react';
+import { isInviteOnlyRegistration, isPublicRegistrationAllowed } from '@/lib/registration-config';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -49,13 +51,16 @@ export default function LoginPage() {
     try {
       const store = useAuthStore.getState();
       if (store.isAuthenticated) {
+        const previousAccessToken = store.accessToken;
         useAuthStore.setState({
           user: null,
           accessToken: null,
           refreshToken: null,
           isAuthenticated: false,
         });
-        import('@/lib/auth-session').then(({ clearAuthSession }) => clearAuthSession().catch(() => {}));
+        import('@/lib/auth-session').then(({ clearAuthSession }) =>
+          clearAuthSession(previousAccessToken).catch(() => {}),
+        );
       }
       const result = await authApi.login(credentials) as {
         mfaRequired?: boolean;
@@ -72,7 +77,7 @@ export default function LoginPage() {
       if (result.accessToken && result.refreshToken && result.user) {
         const roles = normalizeRoles(result.user.roles);
         const isAdminUser = await setAuth({ ...result.user, roles } as never, result.accessToken, result.refreshToken);
-        router.replace(redirectTo ?? (isAdminUser ? '/dashboard' : '/my-exams'));
+        redirectAfterLogin(isAdminUser, redirectTo);
         return;
       }
       setError('Login failed. Please try again.');
@@ -86,14 +91,6 @@ export default function LoginPage() {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     await loginWithCredentials(readCredentials(e.currentTarget));
-  }
-
-  async function fillDemo(role: 'teacher' | 'candidate') {
-    const credentials =
-      role === 'teacher'
-        ? { email: 'teacher@example.com', password: 'Teacher@123' }
-        : { email: 'candidate@example.com', password: 'Candidate@123' };
-    await loginWithCredentials(credentials);
   }
 
   return (
@@ -152,22 +149,17 @@ export default function LoginPage() {
           <Button type="submit" className="w-full shadow-sm" size="lg" disabled={loading}>
             {loading ? 'Signing in…' : 'Sign in'}
           </Button>
-          {process.env.NODE_ENV !== 'production' && (
-            <div className="grid grid-cols-2 gap-2">
-              <button type="button" disabled={loading} onClick={() => fillDemo('teacher')} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted">
-                Teacher demo
-              </button>
-              <button type="button" disabled={loading} onClick={() => fillDemo('candidate')} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted">
-                Student demo
-              </button>
-            </div>
-          )}
         </form>
-        {(process.env.NEXT_PUBLIC_ALLOW_PUBLIC_REGISTRATION === 'true' ||
-          process.env.NODE_ENV !== 'production') && (
+        {isPublicRegistrationAllowed() && (
           <p className="text-center text-sm text-muted-foreground">
             Don&apos;t have an account?{' '}
             <Link href="/register" className="font-medium text-primary hover:underline">Create account</Link>
+          </p>
+        )}
+        {isInviteOnlyRegistration() && (
+          <p className="text-center text-sm text-muted-foreground">
+            Invited by your school?{' '}
+            <span className="text-foreground/80">Open the signup link from your administrator.</span>
           </p>
         )}
       </div>

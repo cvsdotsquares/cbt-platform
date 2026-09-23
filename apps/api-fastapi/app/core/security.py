@@ -58,7 +58,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "session:manage", "mfa:manage",
         "tenant:create", "tenant:read", "tenant:update", "tenant:delete",
         "tenant:branding", "tenant:security_config",
-        "candidate:create", "candidate:read", "candidate:update", "candidate:delete",
+        "candidate:create", "candidate:invite", "candidate:read", "candidate:update", "candidate:delete",
         "candidate:kyc_verify", "candidate:bulk_import", "candidate:admit_card",
         "question:create", "question:read", "question:update", "question:delete",
         "question:approve", "question:import", "question:export", "question:version",
@@ -80,7 +80,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "session:manage", "mfa:manage",
         "tenant:read", "tenant:update", "tenant:branding",
         "tenant:security_config", "tenant:create", "tenant:delete",
-        "candidate:create", "candidate:read", "candidate:update", "candidate:delete",
+        "candidate:create", "candidate:invite", "candidate:read", "candidate:update", "candidate:delete",
         "candidate:kyc_verify", "candidate:bulk_import", "candidate:admit_card",
         "question:create", "question:read", "question:update", "question:delete",
         "question:approve", "question:import", "question:export", "question:version",
@@ -98,7 +98,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     ],
     "EXAM_MANAGER": [
         "user:read", "tenant:read",
-        "candidate:create", "candidate:read", "candidate:update", "candidate:kyc_verify",
+        "candidate:create", "candidate:invite", "candidate:read", "candidate:update", "candidate:kyc_verify",
         "candidate:bulk_import", "candidate:admit_card",
         "question:read", "question:export",
         "exam:create", "exam:read", "exam:update", "exam:delete", "exam:publish",
@@ -143,7 +143,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "user:create", "user:read", "user:update", "user:delete", "user:assign_role",
         "session:manage", "mfa:manage",
         "tenant:read", "tenant:update", "tenant:branding", "tenant:security_config",
-        "candidate:create", "candidate:read", "candidate:update", "candidate:delete",
+        "candidate:create", "candidate:invite", "candidate:read", "candidate:update", "candidate:delete",
         "candidate:bulk_import",
         "question:create", "question:read", "question:update", "question:delete",
         "question:approve", "question:import", "question:export", "question:version",
@@ -151,16 +151,18 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "exam:schedule", "exam:assign_candidates", "exam:template", "exam:view_response",
         "result:evaluate", "result:publish", "result:read", "result:rank", "result:cutoff", "result:certificate",
         "analytics:view", "analytics:export", "audit:read",
+        "proctoring:monitor", "security:view_violations",
         "curriculum:manage", "curriculum:read", "batch:manage", "batch:read",
         "syllabus:manage", "syllabus:read", "material:upload", "material:read", "material:delete",
         "ai:generate_test", "learning:read", "learning:manage",
     ],
     "TEACHER": [
-        "candidate:read", "candidate:update", "curriculum:read", "batch:read",
+        "candidate:invite", "candidate:read", "candidate:update", "curriculum:read", "batch:read",
         "syllabus:manage", "syllabus:read", "question:read", "question:update",
         "exam:create", "exam:read", "exam:update", "exam:publish", "exam:schedule",
         "exam:assign_candidates", "exam:view_response",
         "result:read", "result:evaluate", "result:publish", "result:rank",
+        "proctoring:monitor", "security:view_violations", "analytics:view",
         "material:read", "ai:generate_test", "learning:read", "learning:manage",
     ],
     "STUDENT": [
@@ -347,7 +349,7 @@ def create_refresh_token(
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(
-            days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+            hours=settings.REFRESH_TOKEN_EXPIRE_HOURS
         )
 
     to_encode.update({

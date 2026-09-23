@@ -113,6 +113,36 @@ async def _load_classes(
     ]
 
 
+async def _subject_ids_with_materials(
+    db: AsyncSession,
+    tenant_id: str,
+    allowed_subject_ids: list[str] | None = None,
+) -> set[str]:
+    if allowed_subject_ids is not None and not allowed_subject_ids:
+        return set()
+
+    params: dict[str, object] = {"tenant_id": str(tenant_id)}
+    subject_clause = ""
+    if allowed_subject_ids:
+        params["subject_ids"] = [str(sid) for sid in allowed_subject_ids]
+        subject_clause = "AND sm.subject_id::text = ANY(CAST(:subject_ids AS text[]))"
+
+    result = await db.execute(
+        text(
+            f"""
+            SELECT DISTINCT sm.subject_id
+            FROM study_materials sm
+            WHERE sm.tenant_id::text = :tenant_id
+              AND sm.status = 'READY'
+              AND sm.subject_id IS NOT NULL
+              {subject_clause}
+            """
+        ),
+        params,
+    )
+    return {str(row[0]) for row in result.all() if row[0]}
+
+
 async def _uploaded_chapter_ids_for_tenant(
     db: AsyncSession,
     tenant_id: str,
@@ -194,9 +224,33 @@ async def list_classes(
     tenant_id = current_user.tenant_id
     if uploaded_only:
         chapter_ids = await _uploaded_chapter_ids_for_tenant(db, tenant_id)
-        if not chapter_ids:
+        material_subject_ids = await _subject_ids_with_materials(db, tenant_id)
+        if not chapter_ids and not material_subject_ids:
             return []
         classes = await _load_classes(db, tenant_id, include_topics=include_topics)
-        return _filter_classes_by_chapters(classes, chapter_ids)
+        filtered = _filter_classes_by_chapters(classes, chapter_ids)
+        if not material_subject_ids:
+            return filtered
+        by_class_id = {str(c["id"]): c for c in filtered}
+        for cls in classes:
+            cid = str(cls["id"])
+            subjects_out: list[dict] = []
+            existing = by_class_id.get(cid)
+            existing_by_subj = {
+                str(s["id"]): s for s in (existing or {}).get("subjects", [])
+            }
+            for subject in cls["subjects"]:
+                sid = str(subject["id"])
+                if sid not in material_subject_ids:
+                    if sid in existing_by_subj:
+                        subjects_out.append(existing_by_subj[sid])
+                    continue
+                if sid in existing_by_subj:
+                    subjects_out.append(existing_by_subj[sid])
+                else:
+                    subjects_out.append({**subject, "books": []})
+            if subjects_out:
+                by_class_id[cid] = {**cls, "subjects": subjects_out}
+        return sorted(by_class_id.values(), key=lambda c: c["level"])
 
     return await _load_classes(db, tenant_id, include_topics=include_topics)

@@ -13,12 +13,19 @@ import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { resolveTenantCached } from '../../common/utils/tenant-cache';
 import { MfaService } from './mfa.service';
+import { RegistrationInviteService } from './registration-invite.service';
 import {
   LoginDto,
   RegisterDto,
   MfaVerifyDto,
 } from './dto/auth.dto';
 import { Role, getPermissionsForRoles, JwtPayload } from '@cbt/shared';
+import {
+  assertAllowedRegistrationEmail,
+  isPublicRegistrationAllowed,
+} from '../../common/utils/registration-policy.util';
+import { normalizeInviteEmail } from '../../common/utils/registration-invite.util';
+import { assertStrongPassword } from '../../common/utils/password-policy.util';
 
 const BCRYPT_ROUNDS = 12;
 const MAX_FAILED_ATTEMPTS = 5;
@@ -31,25 +38,36 @@ export class AuthService {
     private jwt: JwtService,
     private config: ConfigService,
     private mfa: MfaService,
+    private registrationInvites: RegistrationInviteService,
   ) {}
 
-  private isPublicRegistrationAllowed(): boolean {
-    const explicit = this.config.get<string>('ALLOW_PUBLIC_REGISTRATION');
-    if (explicit === 'true') return true;
-    if (explicit === 'false') return false;
-    return this.config.get('NODE_ENV') !== 'production';
-  }
-
   async register(dto: RegisterDto, ipAddress: string, userAgent: string) {
-    if (!this.isPublicRegistrationAllowed()) {
-      throw new ForbiddenException('Public registration is disabled');
+    assertStrongPassword(dto.password);
+    const email = normalizeInviteEmail(dto.email);
+    const publicAllowed = isPublicRegistrationAllowed(this.config);
+    let inviteTenantId: string | undefined;
+    let inviteBatchId: string | null = null;
+    let inviteRegistrationNumber: string | null = null;
+
+    if (!publicAllowed) {
+      if (!dto.inviteCode?.trim()) {
+        throw new ForbiddenException('Registration requires a valid invite from your school');
+      }
+      const invite = await this.registrationInvites.consumeInvite(dto.inviteCode, email);
+      inviteTenantId = invite.tenantId;
+      inviteBatchId = invite.batchId;
+      inviteRegistrationNumber = invite.registrationNumber;
+    } else {
+      assertAllowedRegistrationEmail(this.config, email);
     }
 
-    const tenant = await this.resolveTenant(dto.tenantId);
+    const tenant = inviteTenantId
+      ? await this.prisma.tenant.findFirst({ where: { id: inviteTenantId, isActive: true } })
+      : await this.resolveTenant(dto.tenantId);
     if (!tenant) throw new BadRequestException('Invalid tenant');
 
     const existing = await this.prisma.user.findUnique({
-      where: { tenantId_email: { tenantId: tenant.id, email: dto.email } },
+      where: { tenantId_email: { tenantId: tenant.id, email } },
     });
     if (existing) throw new ConflictException('Email already registered');
 
@@ -57,14 +75,15 @@ export class AuthService {
     const candidateRole = await this.prisma.role.findUnique({
       where: { name: Role.CANDIDATE },
     });
+    const regNo = inviteRegistrationNumber || `CAND-${Date.now().toString().slice(-8)}`;
 
     const user = await this.prisma.user.create({
       data: {
         tenantId: tenant.id,
-        email: dto.email,
+        email,
         passwordHash,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
+        firstName: dto.firstName.trim(),
+        lastName: dto.lastName.trim(),
         status: 'ACTIVE',
         emailVerified: true,
         userRoles: candidateRole
@@ -73,13 +92,19 @@ export class AuthService {
         candidate: {
           create: {
             tenantId: tenant.id,
-            registrationNumber: `CAND-${Date.now().toString().slice(-8)}`,
+            registrationNumber: regNo,
             kycStatus: 'NOT_SUBMITTED',
           },
         },
       },
-      include: { userRoles: { include: { role: true } } },
+      include: { userRoles: { include: { role: true } }, candidate: true },
     });
+
+    if (inviteBatchId && user.candidate) {
+      await this.prisma.batchEnrollment.create({
+        data: { batchId: inviteBatchId, candidateId: user.candidate.id },
+      });
+    }
 
     await this.prisma.loginHistory.create({
       data: {
@@ -92,6 +117,10 @@ export class AuthService {
     });
 
     return this.generateTokens(user, dto.deviceFingerprint, ipAddress, userAgent);
+  }
+
+  validateRegistrationInvite(inviteCode: string) {
+    return this.registrationInvites.validateInviteToken(inviteCode);
   }
 
   async login(dto: LoginDto, ipAddress: string, userAgent: string) {
@@ -196,17 +225,34 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    await this.prisma.session.update({
-      where: { id: session.id },
-      data: { revokedAt: new Date() },
-    });
+    const user = session.user;
+    const roles = user.userRoles.map((ur) => ur.role.name as Role);
+    const permissions = getPermissionsForRoles(roles);
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      tenantId: user.tenantId,
+      roles,
+      permissions: permissions as unknown as string[],
+      sessionId: session.id,
+    };
 
-    return this.generateTokens(
-      session.user,
-      session.deviceFingerprint,
-      session.ipAddress,
-      session.userAgent,
-    );
+    return {
+      accessToken: this.jwt.sign(payload),
+      refreshToken,
+      expiresIn: 900,
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        roles,
+        tenantId: user.tenantId,
+        mfaEnabled: user.mfaEnabled,
+      },
+    };
   }
 
   async logout(userId: string, sessionId?: string) {
@@ -314,7 +360,7 @@ export class AuthService {
 
     const accessToken = this.jwt.sign(payload);
     const refreshToken = uuidv4();
-    const refreshExpiry = this.config.get('JWT_REFRESH_EXPIRY', '7d');
+    const refreshExpiry = this.config.get('JWT_REFRESH_EXPIRY', '3h');
     const expiresAt = this.parseRefreshExpiry(refreshExpiry);
 
     await this.prisma.session.create({

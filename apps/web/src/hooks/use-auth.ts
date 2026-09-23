@@ -1,7 +1,7 @@
 'use client';
 
 import { useAuthStore } from '@/stores/auth-store';
-import { isAdmin, normalizeRoles } from '@/lib/roles';
+import { isAdmin, isCandidate, normalizeRoles } from '@/lib/roles';
 import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 
@@ -30,6 +30,7 @@ export function useRequireCandidate() {
   const { isAuthenticated, user, accessToken, _hasHydrated } = useAuthStore();
   const router = useRouter();
   const roles = normalizeRoles(user?.roles);
+  const isCandidateUser = isCandidate(roles);
 
   useEffect(() => {
     if (!_hasHydrated) return;
@@ -39,10 +40,10 @@ export function useRequireCandidate() {
       return;
     }
 
-    if (user && isAdmin(roles)) {
+    if (user && !isCandidateUser) {
       router.replace('/dashboard');
     }
-  }, [_hasHydrated, isAuthenticated, accessToken, user, roles, router]);
+  }, [_hasHydrated, isAuthenticated, accessToken, user, isCandidateUser, router]);
 
-  return { user, accessToken, isAuthenticated, ready: _hasHydrated };
+  return { user, accessToken, isAuthenticated, ready: _hasHydrated, isCandidateUser };
 }

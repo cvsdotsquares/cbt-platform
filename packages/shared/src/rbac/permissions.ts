@@ -18,6 +18,7 @@ export enum Permission {
 
   // Candidates
   CANDIDATE_CREATE = 'candidate:create',
+  CANDIDATE_INVITE = 'candidate:invite',
   CANDIDATE_READ = 'candidate:read',
   CANDIDATE_UPDATE = 'candidate:update',
   CANDIDATE_DELETE = 'candidate:delete',

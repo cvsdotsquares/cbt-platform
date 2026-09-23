@@ -57,6 +57,7 @@ export class ExamsService {
       : null;
     const scheduleCheck = validateExamSchedule(startTime, endTime, durationMinutes, {
       disallowPastStart: true,
+      timeZone: timezone,
     });
     if (!scheduleCheck.ok) {
       throw new BadRequestException(scheduleCheck.message);
@@ -186,7 +187,14 @@ export class ExamsService {
   async updateSchedule(
     id: string,
     tenantId: string,
-    data: { startTime: string; endTime: string; timezone?: string; durationMinutes?: number },
+    data: {
+      startTime: string;
+      endTime: string;
+      timezone?: string;
+      durationMinutes?: number;
+      passingScore?: number;
+      maxAttempts?: number;
+    },
   ) {
     const exam = await this.prisma.exam.findFirst({ where: { id, tenantId } });
     if (!exam) throw new NotFoundException('Exam not found');
@@ -209,12 +217,26 @@ export class ExamsService {
       throw new BadRequestException('Duration must be at least 1 minute.');
     }
 
+    if (typeof data.passingScore === 'number' && (data.passingScore < 0 || data.passingScore > 100)) {
+      throw new BadRequestException('Pass score must be between 0 and 100.');
+    }
+
+    if (typeof data.maxAttempts === 'number' && data.maxAttempts < 1) {
+      throw new BadRequestException('Max attempts must be at least 1.');
+    }
+
     const scheduleCheck = validateExamSchedule(startTime, endTime, durationMinutes, {
       disallowPastStart: true,
+      timeZone: timezone,
     });
     if (!scheduleCheck.ok) {
       throw new BadRequestException(scheduleCheck.message);
     }
+
+    const nextSettings = { ...existingSettings } as Record<string, unknown>;
+    if (durationMinutes != null) nextSettings.durationMinutes = durationMinutes;
+    if (typeof data.passingScore === 'number') nextSettings.passingScore = data.passingScore;
+    if (typeof data.maxAttempts === 'number') nextSettings.maxAttempts = Math.floor(data.maxAttempts);
 
     return this.prisma.exam.update({
       where: { id },
@@ -222,9 +244,7 @@ export class ExamsService {
         startTime,
         endTime,
         timezone,
-        ...(durationMinutes != null
-          ? { settings: { ...existingSettings, durationMinutes } as never }
-          : {}),
+        settings: nextSettings as never,
       },
     });
   }
@@ -423,7 +443,7 @@ export class ExamsService {
 
   async getAvailableForCandidate(userId: string) {
     const candidateId = await resolveCandidateId(this.prisma, userId);
-    return this.prisma.examRegistration.findMany({
+    const registrations = await this.prisma.examRegistration.findMany({
       where: {
         candidateId,
         exam: { status: { in: [...CANDIDATE_VISIBLE_EXAM_STATUSES] } },
@@ -433,11 +453,28 @@ export class ExamsService {
         sessions: {
           where: { candidateId },
           orderBy: { createdAt: 'desc' },
-          take: 1,
-          select: { id: true, status: true, submittedAt: true },
+          select: { id: true, status: true, submittedAt: true, createdAt: true },
         },
       },
       orderBy: { registeredAt: 'desc' },
+    });
+
+    return registrations.map((reg) => {
+      const submittedAttemptCount = reg.sessions.filter(
+        (s) => s.status === 'SUBMITTED' || s.status === 'AUTO_SUBMITTED',
+      ).length;
+      const latestSession = reg.sessions[0]
+        ? {
+            id: reg.sessions[0].id,
+            status: reg.sessions[0].status,
+            submittedAt: reg.sessions[0].submittedAt,
+          }
+        : undefined;
+      return {
+        ...reg,
+        submittedAttemptCount,
+        sessions: latestSession ? [latestSession] : [],
+      };
     });
   }
 
@@ -463,19 +500,24 @@ export class ExamsService {
         sessions: {
           where: { candidateId },
           orderBy: { createdAt: 'desc' },
-          take: 1,
-          select: { id: true, status: true },
+          select: { id: true, status: true, submittedAt: true, createdAt: true },
         },
       },
     });
     if (!registration) throw new NotFoundException('Not registered for this exam');
     assertExamVisibleToCandidate(registration.exam.status);
 
+    const submittedAttemptCount = registration.sessions.filter(
+      (s) => s.status === 'SUBMITTED' || s.status === 'AUTO_SUBMITTED',
+    ).length;
+    const latestSession = registration.sessions[0];
+
     return {
       ...registration.exam,
       registration: {
         id: registration.id,
-        sessions: registration.sessions,
+        submittedAttemptCount,
+        sessions: latestSession ? [{ id: latestSession.id, status: latestSession.status }] : [],
       },
     };
   }

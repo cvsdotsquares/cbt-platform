@@ -33,10 +33,10 @@ class LoginResponse(BaseModel):
     """Login response schema."""
     model_config = ConfigDict(populate_by_name=True)
 
-    access_token: str = Field(..., serialization_alias="accessToken")
-    refresh_token: str = Field(..., serialization_alias="refreshToken")
-    token_type: str = Field(default="bearer", serialization_alias="tokenType")
-    expires_in: int = Field(default=900, serialization_alias="expiresIn")
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int = 900
     user: AuthUserResponse = Field(..., description="User information")
 
 
@@ -51,10 +51,10 @@ class RefreshTokenResponse(BaseModel):
     """Refresh token response schema."""
     model_config = ConfigDict(populate_by_name=True)
 
-    access_token: str = Field(..., serialization_alias="accessToken")
-    refresh_token: Optional[str] = Field(None, serialization_alias="refreshToken")
-    token_type: str = Field(default="bearer", serialization_alias="tokenType")
-    expires_in: int = Field(default=900, serialization_alias="expiresIn")
+    access_token: str
+    refresh_token: Optional[str] = None
+    token_type: str = "bearer"
+    expires_in: int = 900
 
 
 class LogoutRequest(BaseModel):
@@ -73,8 +73,15 @@ class UserCreate(BaseModel):
     first_name: Optional[str] = Field("", alias="firstName")
     last_name: Optional[str] = Field("", alias="lastName")
     full_name: Optional[str] = Field(None, alias="fullName")
-    role: Optional[str] = Field("user", description="User role")
-    tenant_id: UUID = Field(..., alias="tenantId")
+    role: Optional[str] = Field("CANDIDATE", description="User role")
+    tenant_id: Optional[UUID] = Field(None, alias="tenantId")
+    invite_code: Optional[str] = Field(None, alias="inviteCode")
+
+
+class InviteValidateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    invite_code: str = Field(..., alias="inviteCode")
 
 
 class UserResponse(BaseModel):

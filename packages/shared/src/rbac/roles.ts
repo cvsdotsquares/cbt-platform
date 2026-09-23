@@ -10,7 +10,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     Permission.MFA_MANAGE,
     Permission.TENANT_READ, Permission.TENANT_UPDATE, Permission.TENANT_BRANDING,
     Permission.TENANT_SECURITY_CONFIG,
-    Permission.CANDIDATE_CREATE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
+    Permission.CANDIDATE_CREATE, Permission.CANDIDATE_INVITE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
     Permission.CANDIDATE_DELETE, Permission.CANDIDATE_KYC_VERIFY, Permission.CANDIDATE_BULK_IMPORT,
     Permission.CANDIDATE_ADMIT_CARD,
     Permission.QUESTION_CREATE, Permission.QUESTION_READ, Permission.QUESTION_UPDATE,
@@ -39,7 +39,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   [Role.EXAM_MANAGER]: [
     Permission.USER_READ,
     Permission.TENANT_READ,
-    Permission.CANDIDATE_CREATE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
+    Permission.CANDIDATE_CREATE, Permission.CANDIDATE_INVITE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
     Permission.CANDIDATE_KYC_VERIFY, Permission.CANDIDATE_BULK_IMPORT, Permission.CANDIDATE_ADMIT_CARD,
     Permission.QUESTION_READ, Permission.QUESTION_EXPORT,
     Permission.EXAM_CREATE, Permission.EXAM_READ, Permission.EXAM_UPDATE,
@@ -117,7 +117,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     Permission.MFA_MANAGE,
     Permission.TENANT_READ, Permission.TENANT_UPDATE, Permission.TENANT_BRANDING,
     Permission.TENANT_SECURITY_CONFIG,
-    Permission.CANDIDATE_CREATE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
+    Permission.CANDIDATE_CREATE, Permission.CANDIDATE_INVITE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
     Permission.CANDIDATE_DELETE, Permission.CANDIDATE_BULK_IMPORT,
     Permission.QUESTION_CREATE, Permission.QUESTION_READ, Permission.QUESTION_UPDATE,
     Permission.QUESTION_DELETE, Permission.QUESTION_APPROVE, Permission.QUESTION_IMPORT,
@@ -127,6 +127,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     Permission.EXAM_ASSIGN_CANDIDATES, Permission.EXAM_TEMPLATE, Permission.EXAM_VIEW_RESPONSE,
     Permission.RESULT_EVALUATE, Permission.RESULT_PUBLISH, Permission.RESULT_READ,
     Permission.RESULT_RANK, Permission.RESULT_CUTOFF, Permission.RESULT_CERTIFICATE,
+    Permission.PROCTORING_MONITOR, Permission.SECURITY_VIEW_VIOLATIONS,
     Permission.ANALYTICS_VIEW, Permission.ANALYTICS_EXPORT,
     Permission.AUDIT_READ,
     Permission.CURRICULUM_MANAGE, Permission.CURRICULUM_READ,
@@ -139,7 +140,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
 
   /** Teaching portal — assigned subjects, progress, students, class tests, results. */
   [Role.TEACHER]: [
-    Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
+    Permission.CANDIDATE_INVITE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
     Permission.CURRICULUM_READ,
     Permission.BATCH_READ,
     Permission.SYLLABUS_MANAGE, Permission.SYLLABUS_READ,
@@ -148,6 +149,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     Permission.EXAM_PUBLISH, Permission.EXAM_SCHEDULE, Permission.EXAM_ASSIGN_CANDIDATES,
     Permission.EXAM_VIEW_RESPONSE,
     Permission.RESULT_READ, Permission.RESULT_EVALUATE, Permission.RESULT_PUBLISH, Permission.RESULT_RANK,
+    Permission.PROCTORING_MONITOR, Permission.SECURITY_VIEW_VIOLATIONS, Permission.ANALYTICS_VIEW,
     Permission.MATERIAL_READ,
     Permission.AI_GENERATE_TEST,
     Permission.LEARNING_READ, Permission.LEARNING_MANAGE,

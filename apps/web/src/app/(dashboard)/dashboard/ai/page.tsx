@@ -17,7 +17,7 @@ type GeneratedQuestion = {
   title: string;
   content: { text: string };
   options: Record<string, string>;
-  correctAnswer: { value: string | string[] };
+  correctAnswer: { value: string | string[]; rubric?: string };
   type: string;
   difficulty: string;
   marks: number;
@@ -29,7 +29,7 @@ export default function AiStudioPage() {
   const [topic, setTopic] = useState('General Aptitude');
   const [count, setCount] = useState(3);
   const [difficulty, setDifficulty] = useState('MEDIUM');
-  const [questionType, setQuestionType] = useState<'MCQ' | 'MSQ'>('MCQ');
+  const [questionType, setQuestionType] = useState<'MCQ' | 'MSQ' | 'SUBJECTIVE' | 'CASE_STUDY'>('MCQ');
   const [generated, setGenerated] = useState<{
     questions: GeneratedQuestion[];
     source: string;
@@ -128,8 +128,8 @@ export default function AiStudioPage() {
           </div>
           <div>
             <h3 className="text-lg font-bold">Intelligent Exam Content Engine</h3>
-            <p className="text-sm text-muted-foreground">
-              Generate original MCQ and MSQ questions on any topic using OpenAI GPT.
+              <p className="text-sm text-muted-foreground">
+              Generate MCQ, MSQ, and AI-gradable subjective questions on any topic using OpenAI GPT.
             </p>
           </div>
         </div>
@@ -191,10 +191,12 @@ export default function AiStudioPage() {
               <select
                 className="form-select"
                 value={questionType}
-                onChange={(e) => setQuestionType(e.target.value as 'MCQ' | 'MSQ')}
+                onChange={(e) => setQuestionType(e.target.value as 'MCQ' | 'MSQ' | 'SUBJECTIVE' | 'CASE_STUDY')}
               >
                 <option value="MCQ">MCQ (single answer)</option>
                 <option value="MSQ">MSQ (multiple answers)</option>
+                <option value="SUBJECTIVE">Subjective (AI graded)</option>
+                <option value="CASE_STUDY">Case study (AI graded)</option>
               </select>
             </div>
           </div>
@@ -237,17 +239,29 @@ export default function AiStudioPage() {
                       </Badge>
                     </div>
                     <p className="mt-1 text-sm">{q.content.text}</p>
-                    <div className="mt-2 grid grid-cols-1 gap-1 text-sm text-muted-foreground sm:grid-cols-2">
-                      {Object.entries(q.options).map(([k, v]) => (
-                        <span
-                          key={k}
-                          className={isCorrectOption(k, q.correctAnswer.value) ? 'font-semibold text-primary' : ''}
-                        >
-                          {k.toUpperCase()}. {v}
-                          {isCorrectOption(k, q.correctAnswer.value) ? ' ✓' : ''}
-                        </span>
-                      ))}
-                    </div>
+                    {q.type === 'SUBJECTIVE' || q.type === 'CASE_STUDY' ? (
+                      <div className="mt-3 rounded-lg border border-border/60 bg-background/60 p-3 text-sm">
+                        <p className="font-semibold">Reference answer</p>
+                        <p className="mt-1 text-muted-foreground">{q.correctAnswer.value}</p>
+                        {q.correctAnswer.rubric && (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            <span className="font-semibold">Rubric:</span> {q.correctAnswer.rubric}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="mt-2 grid grid-cols-1 gap-1 text-sm text-muted-foreground sm:grid-cols-2">
+                        {Object.entries(q.options).map(([k, v]) => (
+                          <span
+                            key={k}
+                            className={isCorrectOption(k, q.correctAnswer.value) ? 'font-semibold text-primary' : ''}
+                          >
+                            {k.toUpperCase()}. {v}
+                            {isCorrectOption(k, q.correctAnswer.value) ? ' ✓' : ''}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               ))}

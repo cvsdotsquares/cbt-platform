@@ -6,6 +6,7 @@ import { parsePage, parseLimit } from '../../common/utils/pagination.util';
 import {
   CANDIDATE_VISIBLE_EXAM_STATUSES,
   assertExamVisibleToCandidate,
+  isExamVisibleToCandidate,
 } from '../../common/utils/exam-visibility.util';
 
 const BCRYPT_ROUNDS = 12;
@@ -103,13 +104,40 @@ export class CandidatesService {
   }
 
   async getKycStats(tenantId: string) {
-    const [total, verified, pending, rejected] = await Promise.all([
+    const [total, verified, pending, rejected, byClassRows, unassigned] = await Promise.all([
       this.prisma.candidate.count({ where: { tenantId } }),
       this.prisma.candidate.count({ where: { tenantId, kycStatus: 'VERIFIED' } }),
       this.prisma.candidate.count({ where: { tenantId, kycStatus: 'PENDING' } }),
       this.prisma.candidate.count({ where: { tenantId, kycStatus: 'REJECTED' } }),
+      this.prisma.$queryRaw<{ academic_class_id: string; level: number; count: number }[]>`
+        SELECT ac.id AS academic_class_id, ac.level, COUNT(*)::int AS count
+        FROM (
+          SELECT DISTINCT ON (be.candidate_id) be.candidate_id, be.batch_id
+          FROM batch_enrollments be
+          INNER JOIN candidates c ON c.id = be.candidate_id
+          WHERE c.tenant_id = ${tenantId}::uuid
+          ORDER BY be.candidate_id, be.enrolled_at ASC
+        ) pe
+        INNER JOIN batches b ON b.id = pe.batch_id
+        INNER JOIN academic_classes ac ON ac.id = b.academic_class_id
+        GROUP BY ac.id, ac.level
+      `,
+      this.prisma.candidate.count({
+        where: { tenantId, batchEnrollments: { none: {} } },
+      }),
     ]);
-    return { total, verified, pending, rejected };
+    return {
+      total,
+      verified,
+      pending,
+      rejected,
+      unassigned,
+      byClass: byClassRows.map((r) => ({
+        academicClassId: r.academic_class_id,
+        level: Number(r.level),
+        count: Number(r.count),
+      })),
+    };
   }
 
   async submitKyc(
@@ -241,6 +269,11 @@ export class CandidatesService {
   async updateKyc(id: string, tenantId: string, status: 'VERIFIED' | 'REJECTED') {
     const candidate = await this.prisma.candidate.findFirst({ where: { id, tenantId } });
     if (!candidate) throw new NotFoundException('Candidate not found');
+
+    if (candidate.kycStatus !== 'PENDING') {
+      throw new BadRequestException('Student must submit KYC before it can be verified or rejected.');
+    }
+
     return this.prisma.candidate.update({
       where: { id: candidate.id },
       data: {
@@ -398,17 +431,21 @@ export class CandidatesService {
     });
     if (!candidate) throw new NotFoundException('Candidate not found');
 
-    const [examCount, sessionStats, results] = await Promise.all([
+    const [examCount, sessions, results] = await Promise.all([
       this.prisma.examRegistration.count({
         where: {
           candidateId,
           exam: { status: { in: [...CANDIDATE_VISIBLE_EXAM_STATUSES] } },
         },
       }),
-      this.prisma.examSession.groupBy({
-        by: ['status'],
+      this.prisma.examSession.findMany({
         where: { candidateId },
-        _count: true,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          status: true,
+          examId: true,
+          exam: { select: { endTime: true, status: true } },
+        },
       }),
       this.prisma.examResult.findMany({
         where: { candidateId, published: true },
@@ -416,10 +453,22 @@ export class CandidatesService {
       }),
     ]);
 
-    const countByStatus = (status: string) =>
-      sessionStats.find((s) => s.status === status)?._count ?? 0;
-    const submittedExams = countByStatus('SUBMITTED') + countByStatus('AUTO_SUBMITTED');
-    const inProgressExams = countByStatus('IN_PROGRESS');
+    const latestByExam = new Map<string, (typeof sessions)[0]>();
+    for (const s of sessions) {
+      if (!latestByExam.has(s.examId)) latestByExam.set(s.examId, s);
+    }
+    const latestSessions = [...latestByExam.values()];
+    const now = new Date();
+    const submittedExams = latestSessions.filter((s) =>
+      s.status === 'SUBMITTED' || s.status === 'AUTO_SUBMITTED',
+    ).length;
+    const inProgressExams = latestSessions.filter(
+      (s) =>
+        s.status === 'IN_PROGRESS'
+        && s.exam.endTime
+        && s.exam.endTime >= now
+        && isExamVisibleToCandidate(s.exam.status),
+    ).length;
     const averageScore = results.length
       ? results.reduce((sum, r) => sum + r.percentage, 0) / results.length
       : null;
@@ -465,6 +514,9 @@ export class CandidatesService {
       });
     }
 
+    const settings = (registration.exam.settings || {}) as Record<string, unknown>;
+    const durationMinutes = typeof settings.durationMinutes === 'number' ? settings.durationMinutes : null;
+
     return {
       admitCardId: registration.id,
       admitCardUrl,
@@ -476,6 +528,8 @@ export class CandidatesService {
       startTime: registration.exam.startTime,
       endTime: registration.exam.endTime,
       timezone: registration.exam.timezone,
+      durationMinutes,
+      passingScore: typeof settings.passingScore === 'number' ? settings.passingScore : 40,
       venue: 'Online Proctored Examination',
       instructions: [
         'Arrive 15 minutes before the scheduled start time.',

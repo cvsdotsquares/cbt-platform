@@ -6,7 +6,7 @@ export const AUTH_FLAG_COOKIE = 'cbt-auth';
 export const ADMIN_FLAG_COOKIE = 'cbt-is-admin';
 
 const ACCESS_MAX_AGE = 15 * 60; // 15 minutes
-const REFRESH_MAX_AGE = 7 * 24 * 60 * 60; // 7 days
+const REFRESH_MAX_AGE = 3 * 60 * 60; // 3 hours
 
 export function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';

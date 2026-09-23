@@ -16,6 +16,8 @@ interface UseExamSecurityOptions {
   policy?: Partial<ExamSecurityPolicy> & { fullscreenRequired?: boolean };
   candidateLabel?: string;
   enabled?: boolean;
+  /** Skip tab/blur/fullscreen violation reports (e.g. while screen-share picker is open). */
+  pauseIntegrityReporting?: boolean;
 }
 
 export function useExamSecurity({
@@ -24,6 +26,7 @@ export function useExamSecurity({
   policy = {},
   candidateLabel = '',
   enabled = true,
+  pauseIntegrityReporting = false,
 }: UseExamSecurityOptions) {
   const normalizedPolicy = normalizeSecurityPolicy(policy);
   const fullscreenRequired = normalizedPolicy.fullscreen !== false;
@@ -31,11 +34,15 @@ export function useExamSecurity({
   const [isFullscreen, setIsFullscreen] = useState(() => !fullscreenRequired);
   const reportedRef = useRef(new Set<string>());
 
+  const pauseRef = useRef(pauseIntegrityReporting);
+  pauseRef.current = pauseIntegrityReporting;
+
   const report = useCallback(async (
     eventType: string,
     severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL',
     metadata?: Record<string, unknown>,
   ) => {
+    if (pauseRef.current) return;
     const key = `${eventType}-${Date.now()}`;
     if (reportedRef.current.has(eventType) && severity === 'LOW') return;
     reportedRef.current.add(eventType);

@@ -1,9 +1,23 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { BatchesService } from '../batches/batches.service';
+import { getTeacherBatchIds, isTeacherScoped } from '../../common/utils/teacher-scope.util';
+import type { JwtPayload } from '@cbt/shared';
+
+type LessonCardStatus = 'planned' | 'in-progress' | 'completed';
+
+function mapSyllabusStatus(status: string): LessonCardStatus {
+  if (status === 'COMPLETED') return 'completed';
+  if (status === 'IN_PROGRESS') return 'in-progress';
+  return 'planned';
+}
 
 @Injectable()
 export class LearningService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private batchesService: BatchesService,
+  ) {}
 
   async getStudentDashboard(candidateId: string, tenantId: string) {
     const candidate = await this.prisma.candidate.findFirst({
@@ -270,5 +284,83 @@ export class LearningService {
       include: { topic: { include: { chapter: true } } },
       orderBy: { priority: 'desc' },
     });
+  }
+
+  /** NCERT chapters across institute batches (syllabus progress), for dashboard "My Lessons". */
+  async getInstituteLessons(tenantId: string, user: JwtPayload) {
+    const batches = await this.prisma.batch.findMany({
+      where: { tenantId, isActive: true },
+      include: { academicClass: { select: { name: true } } },
+      orderBy: [{ academicYear: 'desc' }, { name: 'asc' }],
+      take: 40,
+    });
+
+    let scopedBatches = batches;
+    if (isTeacherScoped(user)) {
+      const batchIds = await getTeacherBatchIds(this.prisma, user.sub);
+      scopedBatches = batches.filter((b) => batchIds.includes(b.id));
+    }
+
+    const teacherUserId = isTeacherScoped(user) ? user.sub : undefined;
+    const items: {
+      id: string;
+      chapterId: string;
+      batchId: string;
+      title: string;
+      description: string;
+      subjectName: string;
+      batchName: string;
+      className: string;
+      chapterNumber: number;
+      status: LessonCardStatus;
+    }[] = [];
+
+    for (const batch of scopedBatches) {
+      const progressRows = await this.prisma.syllabusProgress.findMany({
+        where: { batchId: batch.id, chapterId: { not: null } },
+        include: {
+          chapter: {
+            include: {
+              book: { include: { subject: { select: { id: true, name: true } } } },
+            },
+          },
+        },
+      });
+
+      for (const row of progressRows) {
+        if (!row.chapter) continue;
+        const chapter = row.chapter;
+        const subject = chapter.book.subject;
+        const status = mapSyllabusStatus(row.status);
+        items.push({
+          id: `${batch.id}-${chapter.id}`,
+          chapterId: chapter.id,
+          batchId: batch.id,
+          title: chapter.title,
+          description: `${subject.name} · ${batch.name}`,
+          subjectName: subject.name,
+          batchName: batch.name,
+          className: batch.academicClass.name,
+          chapterNumber: chapter.number,
+          status,
+        });
+      }
+    }
+
+    const statusOrder: Record<LessonCardStatus, number> = {
+      'in-progress': 0,
+      planned: 1,
+      completed: 2,
+    };
+
+    items.sort(
+      (a, b) =>
+        statusOrder[a.status] - statusOrder[b.status]
+        || a.className.localeCompare(b.className)
+        || a.subjectName.localeCompare(b.subjectName)
+        || a.chapterNumber - b.chapterNumber,
+    );
+
+    return { items, batchCount: scopedBatches.length };
   }
 }

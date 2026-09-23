@@ -5,22 +5,28 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, JSON
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, JSON, Column
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin
+from app.models.base import Base, TimestampMixin, UuidStr
 
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.question import Question
 
 
-class QuestionVersion(TimestampMixin, Base):
+class QuestionVersion(Base):
     __tablename__ = "question_versions"
 
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         primary_key=True,
         default=uuid.uuid4,
     )
@@ -29,7 +35,7 @@ class QuestionVersion(TimestampMixin, Base):
     # FOREIGN KEYS
     # =========================================================
     question_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         ForeignKey("questions.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -89,7 +95,7 @@ class QuestionVersion(TimestampMixin, Base):
     # APPROVAL
     # =========================================================
     approved_by_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UuidStr,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,

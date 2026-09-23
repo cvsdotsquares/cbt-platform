@@ -20,7 +20,7 @@ export function CertificateDialog({ certificate, loading, onClose }: Certificate
   const passed = certificate
     ? certificate.percentage >= (certificate.passingScore ?? 40)
     : false;
-  const issued = certificate
+  const issued = certificate && certificate.issuedAt
     ? new Date(certificate.issuedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
     : '';
 
@@ -39,9 +39,6 @@ export function CertificateDialog({ certificate, loading, onClose }: Certificate
           <div className="flex flex-col items-center justify-center gap-3 rounded-[inherit] px-6 py-20 text-muted-foreground">
             <div className="h-10 w-10 animate-spin rounded-full border-2 border-primary border-t-transparent" />
             <p className="text-sm font-medium">Generating certificate…</p>
-            <Button variant="outline" size="sm" className="mt-2" onClick={onClose}>
-              Cancel
-            </Button>
           </div>
         )}
 
@@ -97,7 +94,6 @@ export function CertificateDialog({ certificate, loading, onClose }: Certificate
               </div>
 
               <div className="flex flex-wrap justify-end gap-2 border-t border-border/60 pt-4 print:hidden">
-                <Button variant="outline" onClick={onClose}>Close</Button>
                 <Button variant="outline" onClick={() => downloadCertificateHtml(certificate)}>
                   <Download className="mr-2 h-4 w-4" /> Download
                 </Button>

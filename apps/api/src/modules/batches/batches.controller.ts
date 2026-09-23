@@ -68,6 +68,13 @@ export class BatchesController {
     return this.batchesService.remove(id, tenantId);
   }
 
+  @Get(':id/next-roll-number')
+  @RequirePermissions(Permission.BATCH_MANAGE)
+  @ApiOperation({ summary: 'Suggest next available roll number for this batch' })
+  nextRollNumber(@Param('id') id: string, @CurrentUser('tenantId') tenantId: string) {
+    return this.batchesService.suggestNextRollNumber(id, tenantId).then((rollNumber) => ({ rollNumber }));
+  }
+
   @Post(':id/enroll')
   @RequirePermissions(Permission.BATCH_MANAGE)
   enroll(

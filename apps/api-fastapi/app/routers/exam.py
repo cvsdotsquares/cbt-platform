@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -13,6 +13,11 @@ from app.core.security import get_current_user
 from app.models.exam import Exam
 from app.models.user import User
 from app.schemas.exam import ExamCreate, ExamResponse
+from app.core.exam_utils import (
+    DEFAULT_EXAM_TIMEZONE,
+    parse_exam_datetime,
+    validate_exam_schedule,
+)
 from app.services.exam_detail import get_exam_detail
 from app.services.exam_queries import list_exams
 from app.services.candidate_context import (
@@ -31,6 +36,8 @@ class ScheduleUpdate(BaseModel):
     end_time: str = Field(..., alias="endTime")
     timezone: str | None = None
     duration_minutes: int | None = Field(None, alias="durationMinutes")
+    passing_score: int | None = Field(None, alias="passingScore", ge=0, le=100)
+    max_attempts: int | None = Field(None, alias="maxAttempts", ge=1, le=10)
 
 
 class CandidateIdsBody(BaseModel):
@@ -109,7 +116,12 @@ async def my_available_exams(
               e.title, e.code, e.status, e.start_time, e.end_time, e.timezone, e.settings,
               es.id AS session_id,
               es.status AS session_status,
-              es.submitted_at AS session_submitted_at
+              es.submitted_at AS session_submitted_at,
+              (
+                SELECT COUNT(*)::int FROM exam_sessions ses
+                WHERE ses.registration_id = er.id
+                  AND ses.status IN ('SUBMITTED', 'AUTO_SUBMITTED')
+              ) AS submitted_attempt_count
             FROM exam_registrations er
             JOIN exams e ON e.id = er.exam_id
             LEFT JOIN LATERAL (
@@ -120,7 +132,7 @@ async def my_available_exams(
               LIMIT 1
             ) es ON true
             WHERE er.candidate_id = :candidate_id
-              AND e.status IN ('PUBLISHED', 'IN_PROGRESS', 'COMPLETED')
+              AND e.status IN ('PUBLISHED', 'COMPLETED')
             ORDER BY er.registered_at DESC
             """
         ),
@@ -160,6 +172,7 @@ async def my_available_exams(
                 "registeredAt": r["registered_at"].isoformat() if r["registered_at"] else None,
                 "exam": exam,
                 "sessions": sessions,
+                "submittedAttemptCount": int(r["submitted_attempt_count"] or 0),
             }
         )
     return items
@@ -290,13 +303,6 @@ async def publish_exam(
         raise HTTPException(status_code=400, detail="Assign at least one candidate before publishing")
 
     now = datetime.now(timezone.utc)
-    settings = exam["settings"]
-    if isinstance(settings, str):
-        settings = json.loads(settings) if settings else {}
-    settings = settings or {}
-    duration_minutes = int(settings.get("durationMinutes") or 60)
-    publish_start = now
-    publish_end = now + timedelta(minutes=duration_minutes)
 
     await db.execute(
         text(
@@ -313,8 +319,7 @@ async def publish_exam(
         text(
             """
             UPDATE exams
-            SET status = 'PUBLISHED', published_at = :now, updated_at = :now,
-                start_time = :start_time, end_time = :end_time
+            SET status = 'PUBLISHED', published_at = :now, updated_at = :now
             WHERE id = :exam_id AND tenant_id = :tenant_id
             """
         ),
@@ -322,8 +327,6 @@ async def publish_exam(
             "exam_id": exam_id,
             "tenant_id": current_user.tenant_id,
             "now": now,
-            "start_time": publish_start,
-            "end_time": publish_end,
         },
     )
     return await get_exam_detail(db, exam_id, current_user.tenant_id)
@@ -348,10 +351,23 @@ async def update_schedule(
     existing = existing or {}
     if body.duration_minutes:
         existing["durationMinutes"] = body.duration_minutes
+    if body.passing_score is not None:
+        existing["passingScore"] = body.passing_score
+    if body.max_attempts is not None:
+        existing["maxAttempts"] = body.max_attempts
 
-    start = datetime.fromisoformat(body.start_time.replace("Z", "+00:00"))
-    end = datetime.fromisoformat(body.end_time.replace("Z", "+00:00"))
-    tz = body.timezone or exam["timezone"] or "UTC"
+    tz = body.timezone or exam["timezone"] or DEFAULT_EXAM_TIMEZONE
+    try:
+        start = parse_exam_datetime(body.start_time, tz)
+        end = parse_exam_datetime(body.end_time, tz)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    duration = existing.get("durationMinutes")
+    duration_minutes = int(duration) if isinstance(duration, (int, float)) and duration > 0 else None
+    check = validate_exam_schedule(start, end, duration_minutes, disallow_past_start=True)
+    if not check["ok"]:
+        raise HTTPException(status_code=400, detail=check["message"])
     now = datetime.now(timezone.utc)
 
     await db.execute(
@@ -438,6 +454,29 @@ async def sync_candidates(
         raise HTTPException(status_code=400, detail="Can only sync candidates on draft exams")
 
     desired = set(body.candidate_ids)
+    batch_row = await db.execute(
+        text("SELECT batch_id FROM ai_test_configs WHERE exam_id = :exam_id LIMIT 1"),
+        {"exam_id": exam_id},
+    )
+    linked_batch_id = batch_row.scalar()
+    if linked_batch_id and desired:
+        enrolled_rows = await db.execute(
+            text(
+                """
+                SELECT candidate_id FROM batch_enrollments
+                WHERE batch_id = :batch_id
+                  AND candidate_id::text = ANY(CAST(:candidate_ids AS text[]))
+                """
+            ),
+            {"batch_id": linked_batch_id, "candidate_ids": [str(c) for c in desired]},
+        )
+        enrolled_ids = {r[0] for r in enrolled_rows.all()}
+        if len(enrolled_ids) != len(desired):
+            raise HTTPException(
+                status_code=400,
+                detail="Students must belong to the batch linked to this test",
+            )
+
     current_rows = await db.execute(
         text("SELECT candidate_id FROM exam_registrations WHERE exam_id = :exam_id"),
         {"exam_id": exam_id},

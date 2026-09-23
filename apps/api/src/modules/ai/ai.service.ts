@@ -9,7 +9,7 @@ export interface GeneratedQuestion {
   difficulty: string;
   content: { text: string };
   options: Record<string, string>;
-  correctAnswer: { value: string | string[] };
+  correctAnswer: { value: string | string[]; rubric?: string };
   marks: number;
   negativeMarks: number;
 }
@@ -76,15 +76,17 @@ export class AiService {
     const baseUrl = this.config.get('OPENAI_BASE_URL') || 'https://api.openai.com/v1';
     const model = this.config.get('OPENAI_MODEL') || 'gpt-4o-mini';
     const isMsq = params.type === 'MSQ';
+    const isSubjective = ['SUBJECTIVE', 'CASE_STUDY'].includes(params.type);
 
     const systemPrompt = `You are an expert exam question writer for a computer-based testing (CBT) platform.
 Create original, accurate, unambiguous questions suitable for formal assessments.
-Each question must have exactly 4 options labeled a, b, c, d.
-For MCQ, exactly one option is correct. For MSQ, two or more options may be correct.
+For MCQ, create exactly 4 options labeled a, b, c, d with one correct option.
+For MSQ, create exactly 4 options with two or more correct options.
+For SUBJECTIVE and CASE_STUDY, create an open-ended question and put a concise reference answer and grading rubric in correctAnswer.
 Do not include explanations. Avoid trick questions or ambiguous wording.`;
 
     const userPrompt = `Generate exactly ${params.count} ${params.difficulty} difficulty ${params.type} exam questions about "${params.topic}".
-Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each question.`;
+  Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each question.${isSubjective ? ' For each subjective item, put the reference answer in correctAnswer.value and objective scoring criteria in correctAnswer.rubric.' : ''}`;
 
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
@@ -118,13 +120,13 @@ Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each ques
                       },
                       options: {
                         type: 'object',
-                        properties: {
+                        properties: isSubjective ? {} : {
                           a: { type: 'string' },
                           b: { type: 'string' },
                           c: { type: 'string' },
                           d: { type: 'string' },
                         },
-                        required: ['a', 'b', 'c', 'd'],
+                        required: isSubjective ? [] : ['a', 'b', 'c', 'd'],
                         additionalProperties: false,
                       },
                       correctAnswer: {
@@ -132,9 +134,10 @@ Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each ques
                         properties: {
                           value: isMsq
                             ? { type: 'array', items: { type: 'string', enum: ['a', 'b', 'c', 'd'] } }
-                            : { type: 'string', enum: ['a', 'b', 'c', 'd'] },
+                            : { type: 'string' },
+                          rubric: { type: 'string' },
                         },
-                        required: ['value'],
+                        required: ['value', 'rubric'],
                         additionalProperties: false,
                       },
                       marks: { type: 'number' },
@@ -173,6 +176,7 @@ Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each ques
     items: GeneratedQuestion[],
     params: { topic: string; difficulty: string; type: string },
   ): GeneratedQuestion[] {
+    const isSubjective = ['SUBJECTIVE', 'CASE_STUDY'].includes(params.type);
     return items.map((q, i) => {
       const options = q.options || {};
       const normalizedOptions: Record<string, string> = {
@@ -193,7 +197,7 @@ Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each ques
 
       const text = q.content?.text?.trim() || `Question ${i + 1} about ${params.topic}`;
 
-      let finalOptions = normalizedOptions;
+      let finalOptions = isSubjective ? {} : normalizedOptions;
       let finalCorrect = correctValue;
       if (params.type === 'MCQ' && typeof correctValue === 'string' && ['a', 'b', 'c', 'd'].includes(correctValue)) {
         const shuffled = this.shuffleMcqOptions(normalizedOptions, correctValue);
@@ -207,7 +211,7 @@ Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each ques
         difficulty: params.difficulty,
         content: { text },
         options: finalOptions,
-        correctAnswer: { value: finalCorrect as string | string[] },
+        correctAnswer: { value: finalCorrect as string | string[], rubric: q.correctAnswer?.rubric },
         marks: q.marks ?? 2,
         negativeMarks: q.negativeMarks ?? 0,
       };
@@ -251,12 +255,33 @@ Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each ques
     const result: GeneratedQuestion[] = [];
     for (let i = 0; i < params.count; i++) {
       const t = pool[i % pool.length];
+      const isSubjective = ['SUBJECTIVE', 'CASE_STUDY'].includes(params.type);
+      const isMsq = params.type === 'MSQ';
+      const content = isSubjective
+        ? params.type === 'CASE_STUDY'
+          ? `Case study: ${t.content.text} Explain your reasoning and describe how you would apply the concept in this situation.`
+          : `${t.content.text} Explain your answer in your own words and support it with relevant reasoning.`
+        : t.content.text;
+      const correctAnswer = isSubjective
+        ? {
+            value: params.type === 'CASE_STUDY'
+              ? `A complete response should explain the concept behind: ${t.content.text}`
+              : `The response should correctly explain the concept tested by: ${t.content.text}`,
+            rubric: params.type === 'CASE_STUDY'
+              ? 'Award marks for identifying the relevant concept, applying it to the case, and explaining the reasoning clearly.'
+              : 'Award marks for a correct concept, accurate reasoning, and a clear explanation.',
+          }
+        : isMsq
+          ? { value: ['a', 'c'] }
+          : t.correctAnswer;
       result.push({
         ...t,
         title: `${params.topic} Q${i + 1}: ${t.title}`,
         type: params.type,
         difficulty: params.difficulty,
-        content: { text: `[${params.topic}] ${t.content.text}` },
+        content: { text: `[${params.topic}] ${content}` },
+        options: isSubjective ? {} : t.options,
+        correctAnswer,
       });
     }
     return result;
@@ -313,6 +338,63 @@ Return JSON matching the schema. Use marks: 2 and negativeMarks: 0 for each ques
     let h = 0;
     for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
     return Math.abs(h);
+  }
+
+  async gradeSubjective(params: {
+    question: string;
+    referenceAnswer?: string;
+    rubric?: string;
+    answer: string;
+    maxMarks: number;
+  }): Promise<{ marksAwarded: number; isCorrect: boolean; feedback: string; source: 'openai' | 'manual' }> {
+    const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
+    if (!apiKey) {
+      return { marksAwarded: 0, isCorrect: false, feedback: 'AI grading is unavailable; manual review is required.', source: 'manual' };
+    }
+
+    const baseUrl = this.config.get('OPENAI_BASE_URL') || 'https://api.openai.com/v1';
+    const model = this.config.get('OPENAI_MODEL') || 'gpt-4o-mini';
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: 'You grade exam answers fairly. Award marks only for demonstrated understanding, do not infer missing work, and return JSON only.' },
+          { role: 'user', content: JSON.stringify({ ...params, instruction: `Award a score from 0 to ${params.maxMarks}.` }) },
+        ],
+        temperature: 0,
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'subjective_grade',
+            strict: true,
+            schema: {
+              type: 'object',
+              properties: {
+                marksAwarded: { type: 'number' },
+                isCorrect: { type: 'boolean' },
+                feedback: { type: 'string' },
+              },
+              required: ['marksAwarded', 'isCorrect', 'feedback'],
+              additionalProperties: false,
+            },
+          },
+        },
+      }),
+    });
+    if (!response.ok) throw new Error(`OpenAI grading error ${response.status}`);
+    const data = await response.json() as { choices: { message: { content: string } }[] };
+    const parsed = JSON.parse(data.choices?.[0]?.message?.content || '{}') as {
+      marksAwarded?: number; isCorrect?: boolean; feedback?: string;
+    };
+    const marksAwarded = Math.max(0, Math.min(params.maxMarks, Number(parsed.marksAwarded) || 0));
+    return {
+      marksAwarded,
+      isCorrect: Boolean(parsed.isCorrect) && marksAwarded > 0,
+      feedback: parsed.feedback?.trim() || 'Answer evaluated by AI.',
+      source: 'openai',
+    };
   }
 
   async processProctoringFrame(sessionId: string, thumbnail: string) {

@@ -242,6 +242,64 @@
     border-color: hsl(0 0% 100% / 0.08);
   }
 
+  .welcome-banner-glass-frost {
+    background: linear-gradient(
+      105deg,
+      transparent 0%,
+      hsl(0 0% 100% / 0.12) 55%,
+      hsl(0 0% 100% / 0.22) 100%
+    );
+  }
+  .dark .welcome-banner-glass-frost {
+    background: linear-gradient(
+      105deg,
+      transparent 0%,
+      hsl(229 89% 73% / 0.04) 55%,
+      hsl(0 0% 100% / 0.08) 100%
+    );
+  }
+  .welcome-banner-glass-shimmer {
+    background: linear-gradient(
+      110deg,
+      transparent 30%,
+      hsl(0 0% 100% / 0.35) 50%,
+      transparent 70%
+    );
+    background-size: 280% 100%;
+    animation: welcome-glass-shimmer 14s ease-in-out infinite;
+  }
+  .dark .welcome-banner-glass-shimmer {
+    background: linear-gradient(
+      110deg,
+      transparent 40%,
+      hsl(229 89% 73% / 0.14) 50%,
+      transparent 60%
+    );
+    background-size: 200% 100%;
+  }
+  .welcome-banner-glass-wave-a {
+    animation: welcome-glass-wave-drift 32s linear infinite;
+  }
+  .welcome-banner-glass-wave-b {
+    animation: welcome-glass-wave-drift 42s linear infinite reverse;
+    animation-delay: -12s;
+  }
+  .welcome-banner-glass-wave-a .welcome-banner-glass-wave-svg {
+    animation: welcome-glass-wave-swell 11s ease-in-out infinite;
+  }
+  .welcome-banner-glass-wave-b .welcome-banner-glass-wave-svg {
+    animation: welcome-glass-wave-swell 14s ease-in-out infinite;
+    animation-delay: -4s;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .welcome-banner-glass-shimmer,
+    .welcome-banner-glass-wave-a,
+    .welcome-banner-glass-wave-b,
+    .welcome-banner-glass-wave-svg {
+      animation: none;
+    }
+  }
+
   /* Decorative orb for hero/auth panels */
   .orb {
     @apply absolute rounded-full pointer-events-none;
@@ -467,6 +525,42 @@
 @keyframes login-hero-float {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-12px); }
+}
+
+@keyframes welcome-glass-shimmer {
+  0%, 100% { background-position: 120% 0; opacity: 0.35; }
+  50% { background-position: -30% 0; opacity: 0.9; }
+}
+
+@keyframes welcome-glass-wave-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(-58.333%); }
+}
+
+@keyframes welcome-glass-wave-swell {
+  0%, 100% { transform: translateY(3%) scaleY(1); }
+  50% { transform: translateY(-2%) scaleY(1.06); }
+}
+
+/* Visible scrollbars for tab rows and scroll panels */
+.app-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+.app-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.app-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 999px;
+}
+.app-scrollbar::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 999px;
+}
+.app-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.45);
 }
 
 @media (prefers-reduced-motion: reduce) {

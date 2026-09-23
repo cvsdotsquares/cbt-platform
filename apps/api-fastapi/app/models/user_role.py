@@ -39,6 +39,7 @@ class UserRole(Base):
     assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        default=datetime.utcnow,
     )
 
     assigned_by: Mapped[str | None] = mapped_column(

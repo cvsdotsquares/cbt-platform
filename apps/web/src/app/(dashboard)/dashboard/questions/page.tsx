@@ -266,11 +266,10 @@ export default function QuestionsPage() {
             <DialogTitle>Delete question?</DialogTitle>
             <DialogDescription>
               Permanently delete <span className="font-medium text-foreground">{deleteTarget?.title}</span> from the question bank.
-              Cannot be undone if used in a published exam or already answered by candidates.
+              Cannot be undone if used in a published exam or already answered by students.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
             <Button
               variant="destructive"
               disabled={deleteMutation.isPending}

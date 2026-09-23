@@ -39,11 +39,24 @@ export class ProctoringController {
     );
   }
 
+  @Get('events/:eventId')
+  @RequirePermissions(Permission.PROCTORING_MONITOR)
+  @ApiOperation({ summary: 'Violation event detail' })
+  getEventDetail(
+    @Param('eventId') eventId: string,
+    @CurrentUser('tenantId') tenantId: string,
+  ) {
+    return this.proctoringService.getEventDetail(eventId, tenantId);
+  }
+
   @Get('sessions/:examId/live')
   @RequirePermissions(Permission.PROCTORING_MONITOR)
   @ApiOperation({ summary: 'Live monitoring data' })
-  getLiveMonitoring(@Param('examId') examId: string) {
-    return this.proctoringService.getLiveMonitoring(examId);
+  getLiveMonitoring(
+    @Param('examId') examId: string,
+    @CurrentUser('tenantId') tenantId: string,
+  ) {
+    return this.proctoringService.getLiveMonitoring(examId, tenantId);
   }
 
   @Post('sessions/:id/intervene')

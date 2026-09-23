@@ -13,6 +13,8 @@ interface Message {
   content: string;
 }
 
+const AI_ASSISTANT_ENABLED = false;
+
 export function AiAssistant() {
   const { accessToken } = useAuthStore();
   const [open, setOpen] = useState(false);
@@ -26,6 +28,8 @@ export function AiAssistant() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  if (!AI_ASSISTANT_ENABLED) return null;
 
   async function send() {
     if (!input.trim() || !accessToken || loading) return;

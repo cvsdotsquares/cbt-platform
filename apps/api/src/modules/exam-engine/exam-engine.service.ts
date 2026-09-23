@@ -53,8 +53,10 @@ export class ExamEngineService {
       },
     });
     if (!exam) throw new NotFoundException('Exam not found');
-    if (exam.status !== 'PUBLISHED' && exam.status !== 'IN_PROGRESS') {
-      throw new BadRequestException('Exam is not available');
+    if (exam.status !== 'PUBLISHED') {
+      throw new BadRequestException(
+        'This test is not available yet. An administrator must publish it first.',
+      );
     }
 
     const now = new Date();
@@ -62,7 +64,20 @@ export class ExamEngineService {
     if (now > exam.endTime) throw new BadRequestException('Exam has ended');
 
     const settings = (exam.settings || {}) as Record<string, unknown>;
-    const durationMinutes = (settings.durationMinutes as number) || 120;
+    const maxAttempts = typeof settings.maxAttempts === 'number' && settings.maxAttempts >= 1
+      ? Math.floor(settings.maxAttempts)
+      : 1;
+    const completedAttempts = await this.prisma.examSession.count({
+      where: {
+        examId,
+        candidateId,
+        status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] },
+      },
+    });
+    if (completedAttempts >= maxAttempts) {
+      throw new BadRequestException('You have used all allowed attempts for this exam');
+    }
+    const durationMinutes = this.getDurationMinutes(settings, exam.startTime, exam.endTime);
     const initialRemaining = this.calculateTimeRemaining(
       { startedAt: now, timeRemainingSeconds: durationMinutes * 60 },
       durationMinutes,
@@ -135,7 +150,7 @@ export class ExamEngineService {
     }
 
     const exam = session.exam;
-    const durationMinutes = this.getDurationMinutes(exam?.settings);
+    const durationMinutes = this.getDurationMinutes(exam?.settings, exam?.startTime, exam?.endTime);
     const timeRemaining = this.calculateTimeRemaining(session, durationMinutes, exam?.endTime);
 
     const questions = (session.questionOrder as string[] || []).map((qId) => {
@@ -317,6 +332,24 @@ export class ExamEngineService {
     if (session.candidateId !== candidateId) {
       throw new ForbiddenException('Session does not belong to this candidate');
     }
+    if (session.status === 'PAUSED') {
+      return {
+        alive: true,
+        paused: true,
+        autoSubmitted: false,
+        timeRemainingSeconds: session.timeRemainingSeconds ?? 0,
+      };
+    }
+
+    if (session.status === 'TERMINATED') {
+      return {
+        alive: false,
+        terminated: true,
+        autoSubmitted: false,
+        timeRemainingSeconds: 0,
+      };
+    }
+
     if (session.status !== 'IN_PROGRESS') {
       const result = await this.prisma.examResult.findUnique({ where: { sessionId } });
       return {
@@ -332,7 +365,7 @@ export class ExamEngineService {
       await this.persistPendingAnswers(sessionId, pendingAnswers);
     }
 
-    const durationMinutes = this.getDurationMinutes(session.exam?.settings);
+    const durationMinutes = this.getDurationMinutes(session.exam?.settings, undefined, session.exam?.endTime);
     const timeRemaining = this.calculateTimeRemaining(session, durationMinutes, session.exam?.endTime);
     await this.prisma.examSession.update({
       where: { id: sessionId },
@@ -347,9 +380,15 @@ export class ExamEngineService {
     return { alive: true, autoSubmitted: false, timeRemainingSeconds: timeRemaining };
   }
 
-  private getDurationMinutes(settings: unknown): number {
+  private getDurationMinutes(settings: unknown, startTime?: Date | null, endTime?: Date | null): number {
     const config = (settings || {}) as Record<string, unknown>;
-    return (config.durationMinutes as number) || 120;
+    const configured = config.durationMinutes;
+    if (typeof configured === 'number' && configured > 0) return configured;
+    if (startTime && endTime) {
+      const windowMinutes = Math.floor((endTime.getTime() - startTime.getTime()) / 60_000);
+      if (windowMinutes > 0) return windowMinutes;
+    }
+    return 120;
   }
 
   private calculateTimeRemaining(

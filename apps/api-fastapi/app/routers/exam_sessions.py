@@ -99,7 +99,15 @@ async def mark_review(
     current_user: User = Depends(get_current_user),
 ):
     await _owner(db, session_id, current_user.id)
-    await _upsert_response(db, session_id, body.question_id, {}, 0, body.marked)
+    await _upsert_response(
+        db,
+        session_id,
+        body.question_id,
+        None,
+        0,
+        body.marked,
+        update_answer=False,
+    )
     return {"marked": body.marked}
 
 
@@ -142,9 +150,33 @@ async def heartbeat(
     current_user: User = Depends(get_current_user),
 ):
     candidate_id, status = await _owner(db, session_id, current_user.id)
+    if status == "PAUSED":
+        row = await db.execute(
+            text("SELECT time_remaining_seconds FROM exam_sessions WHERE id = :id"),
+            {"id": session_id},
+        )
+        remaining = (row.mappings().first() or {}).get("time_remaining_seconds") or 0
+        return {
+            "alive": True,
+            "paused": True,
+            "autoSubmitted": False,
+            "timeRemainingSeconds": remaining,
+        }
+    if status == "TERMINATED":
+        return {
+            "alive": False,
+            "terminated": True,
+            "autoSubmitted": False,
+            "timeRemainingSeconds": 0,
+        }
     if status != "IN_PROGRESS":
         result = await evaluate_session(db, session_id) if status in ("SUBMITTED", "AUTO_SUBMITTED") else None
-        return {"alive": False, "autoSubmitted": True, "timeRemainingSeconds": 0, "result": result}
+        return {
+            "alive": False,
+            "autoSubmitted": status in ("SUBMITTED", "AUTO_SUBMITTED"),
+            "timeRemainingSeconds": 0,
+            "result": result,
+        }
 
     if body and body.answers:
         for a in body.answers:
@@ -156,7 +188,7 @@ async def heartbeat(
     row = await db.execute(
         text(
             """
-            SELECT es.started_at, e.settings, e.end_time
+            SELECT es.started_at, e.settings, e.start_time, e.end_time
             FROM exam_sessions es JOIN exams e ON e.id = es.exam_id
             WHERE es.id = :id
             """
@@ -164,14 +196,25 @@ async def heartbeat(
         {"id": session_id},
     )
     s = row.mappings().first()
-    remaining = _time_remaining(s["started_at"], _duration_minutes(s["settings"]), s["end_time"])
+    remaining = _time_remaining(
+        s["started_at"],
+        _duration_minutes(s["settings"], s["start_time"], s["end_time"]),
+        s["end_time"],
+    )
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
     await db.execute(
-        text("UPDATE exam_sessions SET time_remaining_seconds = :r WHERE id = :id"),
-        {"r": remaining, "id": session_id},
+        text(
+            """
+            UPDATE exam_sessions
+            SET time_remaining_seconds = :r, updated_at = :now
+            WHERE id = :id
+            """
+        ),
+        {"r": remaining, "id": session_id, "now": now},
     )
     if remaining <= 0:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
         await db.execute(
             text(
                 """
@@ -182,7 +225,9 @@ async def heartbeat(
             ),
             {"id": session_id, "now": now},
         )
+        await db.commit()
         result = await evaluate_session(db, session_id)
         return {"alive": False, "autoSubmitted": True, "timeRemainingSeconds": 0, "result": result}
 
+    await db.commit()
     return {"alive": True, "autoSubmitted": False, "timeRemainingSeconds": remaining}

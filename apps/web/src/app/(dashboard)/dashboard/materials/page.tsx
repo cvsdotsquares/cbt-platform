@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState, useMemo, useEffect } from 'react';
+import { useRef, useState, useMemo, useEffect, type ComponentProps } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,15 +12,18 @@ import { PageHeader } from '@/components/layout/page-header';
 import { materialsApi, curriculumApi } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { usePermissions } from '@/hooks/use-permissions';
-import { Permission } from '@cbt/shared';
+import { Permission, guessSubjectId } from '@cbt/shared';
 import { toast } from '@/hooks/use-toast';
 import {
   Upload, FileText, RefreshCw, Trash2, Loader2, Eye, Download, BookOpen, Shield, X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { TableSkeleton } from '@/components/ui/skeleton';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
+import {
+  readMaterialsUploadSession,
+  writeMaterialsUploadSession,
+} from '@/lib/materials-upload-session';
 
 type Material = {
   id: string;
@@ -53,10 +56,28 @@ type AcademicClass = {
 
 const STATUS_LABEL: Record<string, string> = {
   READY: 'Indexed',
-  INDEXING: 'Processing…',
-  PENDING: 'Queued',
+  INDEXING: 'Indexing…',
+  PENDING: 'Indexing…',
   FAILED: 'Failed',
 };
+
+const MATERIAL_STATUS_RANK: Record<string, number> = {
+  PENDING: 1,
+  INDEXING: 2,
+  FAILED: 3,
+  READY: 4,
+};
+
+function isUploadPlaceholder(m: Material): boolean {
+  return m.id.startsWith('pending-upload-');
+}
+
+function materialStatusBadgeVariant(status: string): ComponentProps<typeof Badge>['variant'] {
+  if (status === 'READY') return 'success';
+  if (status === 'FAILED') return 'destructive';
+  if (status === 'PENDING' || status === 'INDEXING') return 'warning';
+  return 'outline';
+}
 
 const DOC_TYPES = [
   { value: 'NCERT', label: 'NCERT PDF' },
@@ -67,6 +88,92 @@ const DOC_TYPES = [
 ];
 
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+const UPLOAD_PARALLEL_BATCHES = 4;
+const FILES_PER_BATCH = 6;
+
+type UploadJobPayload = {
+  files: File[];
+  meta: {
+    title: string;
+    type: string;
+    academicClassId: string;
+    subjectId: string;
+    chapterId: string;
+    academicSession: string;
+  };
+  uploadScope: 'FULL_BOOK' | 'CHAPTER';
+};
+
+type UploadFileResult = { fileName: string; ok: boolean; error?: string };
+
+type UploadMutationResult = {
+  materials: Material[];
+  fileResults: UploadFileResult[];
+};
+
+type UploadMutateContext = {
+  placeholders: Material[];
+};
+
+function enrichUploadedMaterial(api: Material, placeholder?: Material): Material {
+  if (!placeholder) return api;
+  return {
+    ...api,
+    academicClass: api.academicClass ?? placeholder.academicClass,
+    subject: api.subject ?? placeholder.subject,
+  };
+}
+
+function mergeSessionUploadIds(existingIds: string[], materials: Material[]): string[] {
+  return [
+    ...new Set([
+      ...existingIds.filter((id) => !id.startsWith('pending-upload-')),
+      ...materials.filter((m) => !isUploadPlaceholder(m)).map((m) => m.id),
+    ]),
+  ];
+}
+
+function pickFresherMaterial(existing: Material | undefined, incoming: Material): Material {
+  if (!existing) return incoming;
+  const existingRank = MATERIAL_STATUS_RANK[existing.status] ?? 0;
+  const incomingRank = MATERIAL_STATUS_RANK[incoming.status] ?? 0;
+  if (incomingRank !== existingRank) {
+    return incomingRank > existingRank ? incoming : existing;
+  }
+  if (incoming.chunkCount !== existing.chunkCount) {
+    return incoming.chunkCount > existing.chunkCount ? incoming : existing;
+  }
+  return incoming;
+}
+
+function buildSessionQueueFromIds(ids: string[], ...sources: Material[][]): Material[] {
+  const byId = new Map<string, Material>();
+  for (const list of sources) {
+    for (const m of list) {
+      if (!isUploadPlaceholder(m)) {
+        byId.set(m.id, pickFresherMaterial(byId.get(m.id), m));
+      }
+    }
+  }
+  return ids.map((id) => byId.get(id)).filter((m): m is Material => !!m);
+}
+
+function chunkFiles(files: File[], size: number): File[][] {
+  const batches: File[][] = [];
+  for (let i = 0; i < files.length; i += size) batches.push(files.slice(i, i + size));
+  return batches;
+}
+
+async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let index = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const i = index++;
+      await worker(items[i]);
+    }
+  });
+  await Promise.all(runners);
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -84,9 +191,19 @@ export default function MaterialsPage() {
   const canDelete = can(Permission.MATERIAL_DELETE);
   const queryClient = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
+  /** Match queue rows to server materials only after upload HTTP completes (by id, not filename). */
+  const sessionMaterialIdsRef = useRef<string[]>([]);
+  const uploadSessionHydratedRef = useRef(false);
+
+  const syncUploadSessionStorage = (queue: Material[], ids: string[]) => {
+    if (!user?.id) return;
+    writeMaterialsUploadSession(user.id, ids, queue);
+  };
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
+  /** Only documents from the current upload batch — not full server history. */
+  const [sessionQueue, setSessionQueue] = useState<Material[]>([]);
   const [uploadScope, setUploadScope] = useState<'FULL_BOOK' | 'CHAPTER'>('FULL_BOOK');
   const [meta, setMeta] = useState({
     title: '',
@@ -104,14 +221,43 @@ export default function MaterialsPage() {
 
   if (teacherPortal) return null;
 
-  const { data: materials, isLoading } = useQuery({
+  useEffect(() => {
+    if (!user?.id || uploadSessionHydratedRef.current) return;
+    uploadSessionHydratedRef.current = true;
+    const saved = readMaterialsUploadSession(user.id);
+    if (!saved?.materialIds.length) return;
+    sessionMaterialIdsRef.current = saved.materialIds;
+    setSessionQueue(saved.queue as Material[]);
+    void queryClient.invalidateQueries({ queryKey: ['materials'] });
+  }, [user?.id, queryClient]);
+
+  useEffect(() => {
+    if (!accessToken || !canUpload) return;
+    let cancelled = false;
+    materialsApi
+      .reconcileSubjects(accessToken)
+      .then((res) => {
+        if (cancelled) return;
+        const updated = (res as { updated?: number })?.updated ?? 0;
+        if (updated > 0) {
+          queryClient.invalidateQueries({ queryKey: ['materials'] });
+          queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, canUpload, queryClient]);
+
+  const { data: materials } = useQuery({
     queryKey: ['materials'],
     queryFn: () => materialsApi.list(accessToken!) as Promise<Material[]>,
-    enabled: !!accessToken,
-    refetchInterval: (q) => {
-      const items = q.state.data as Material[] | undefined;
-      return items?.some((m) => m.status === 'PENDING' || m.status === 'INDEXING') ? 3000 : false;
-    },
+    enabled: !!accessToken && sessionQueue.length > 0,
+    staleTime: 0,
+    refetchInterval: sessionQueue.some((m) => m.status === 'PENDING' || m.status === 'INDEXING')
+      ? 3000
+      : false,
   });
 
   const { data: classes } = useQuery({
@@ -178,76 +324,263 @@ export default function MaterialsPage() {
     if (fileRef.current) fileRef.current.value = '';
   };
 
-  const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!pendingFiles.length) throw new Error('Choose at least one file');
-      const results: { fileName: string; ok: boolean; error?: string }[] = [];
-      const total = pendingFiles.length;
-      const useSharedTitle = total === 1;
+  const uploadMutation = useMutation<
+    UploadMutationResult,
+    Error,
+    UploadJobPayload,
+    UploadMutateContext
+  >({
+    mutationFn: async ({ files, meta: uploadMeta, uploadScope: scope }: UploadJobPayload) => {
+      if (!files.length) throw new Error('Choose at least one file');
+      const fileResults: UploadFileResult[] = [];
+      const uploadedMaterials: Material[] = [];
 
-      for (let i = 0; i < pendingFiles.length; i++) {
-        const file = pendingFiles[i];
-        setUploadProgress({ current: i + 1, total });
+      const appendSharedMeta = (fd: FormData) => {
+        fd.append('type', uploadMeta.type);
+        fd.append('academicClassId', uploadMeta.academicClassId);
+        fd.append('subjectId', uploadMeta.subjectId);
+        fd.append('academicSession', uploadMeta.academicSession);
+        fd.append('fullBook', scope === 'FULL_BOOK' ? 'true' : 'false');
+        if (scope === 'CHAPTER' && files.length === 1 && uploadMeta.chapterId) {
+          fd.append('chapterId', uploadMeta.chapterId);
+        }
+      };
+
+      if (files.length === 1) {
+        const file = files[0];
         const fd = new FormData();
         fd.append('file', file);
         fd.append(
           'title',
-          useSharedTitle && meta.title.trim()
-            ? meta.title.trim()
-            : file.name.replace(/\.[^.]+$/, ''),
+          uploadMeta.title.trim() ? uploadMeta.title.trim() : file.name.replace(/\.[^.]+$/, ''),
         );
-        fd.append('type', meta.type);
-        fd.append('academicClassId', meta.academicClassId);
-        fd.append('subjectId', meta.subjectId);
-        if (uploadScope === 'CHAPTER' && total === 1 && meta.chapterId) {
-          fd.append('chapterId', meta.chapterId);
-        }
-        fd.append('academicSession', meta.academicSession);
-        fd.append('fullBook', uploadScope === 'FULL_BOOK' ? 'true' : 'false');
-        try {
-          await materialsApi.upload(accessToken!, fd);
-          results.push({ fileName: file.name, ok: true });
-        } catch (e) {
-          results.push({
-            fileName: file.name,
-            ok: false,
-            error: e instanceof Error ? e.message : 'Upload failed',
-          });
-        }
+        appendSharedMeta(fd);
+        const created = (await materialsApi.upload(accessToken!, fd)) as Material;
+        uploadedMaterials.push(created);
+        return {
+          materials: uploadedMaterials,
+          fileResults: [{ fileName: file.name, ok: true }],
+        };
       }
 
-      setUploadProgress(null);
-      const failed = results.filter((r) => !r.ok);
-      if (failed.length === results.length) {
+      const batches = chunkFiles(files, FILES_PER_BATCH);
+      setUploadProgress({ current: 0, total: batches.length });
+      let completedBatches = 0;
+      await runPool(batches, UPLOAD_PARALLEL_BATCHES, async (batch) => {
+        const fd = new FormData();
+        for (const file of batch) fd.append('files', file);
+        fd.append('titles', batch.map((f) => f.name.replace(/\.[^.]+$/, '')).join('\n'));
+        appendSharedMeta(fd);
+        try {
+          const batchRes = (await materialsApi.uploadBatch(accessToken!, fd)) as {
+            materials?: Material[];
+          };
+          for (const row of batchRes.materials ?? []) uploadedMaterials.push(row);
+          for (const file of batch) fileResults.push({ fileName: file.name, ok: true });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Upload failed';
+          for (const file of batch) fileResults.push({ fileName: file.name, ok: false, error: msg });
+        } finally {
+          completedBatches += 1;
+          setUploadProgress({ current: completedBatches, total: batches.length });
+        }
+      });
+
+      const failed = fileResults.filter((r) => !r.ok);
+      if (failed.length === fileResults.length) {
         throw new Error(failed[0]?.error ?? 'All uploads failed');
       }
-      return results;
+      return { materials: uploadedMaterials, fileResults };
     },
-    onSuccess: (results) => {
-      queryClient.invalidateQueries({ queryKey: ['materials'] });
-      queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
-      queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+    onMutate: ({ files, meta: uploadMeta }) => {
+      setUploadProgress(null);
+      const cls = (classes ?? []).find((c) => c.id === uploadMeta.academicClassId);
+      const subjectHints = (cls?.subjects ?? []).map((s) => ({
+        id: s.id,
+        name: s.name,
+        code: s.code,
+      }));
+      const placeholders: Material[] = files.map((file, index) => {
+        const title =
+          uploadMeta.title.trim() && files.length === 1
+            ? uploadMeta.title.trim()
+            : file.name.replace(/\.[^.]+$/, '');
+        const guessedId = guessSubjectId(
+          file.name,
+          title,
+          subjectHints,
+          uploadMeta.subjectId,
+        );
+        const subject = cls?.subjects.find((s) => s.id === guessedId);
+        return {
+          id: `pending-upload-${index}-${file.name}-${file.lastModified}`,
+          title,
+          type: uploadMeta.type,
+          fileName: file.name,
+          fileSize: file.size,
+          mimeType: file.type || 'application/pdf',
+          status: 'PENDING',
+          chunkCount: 0,
+          academicSession: uploadMeta.academicSession,
+          createdAt: new Date().toISOString(),
+          academicClass: cls ? { level: cls.level, name: cls.name } : null,
+          subject: subject ? { name: subject.name, code: subject.code } : null,
+        };
+      });
+      setSessionQueue((prev) => {
+        const settled = prev.filter((p) => !isUploadPlaceholder(p));
+        sessionMaterialIdsRef.current = mergeSessionUploadIds(
+          sessionMaterialIdsRef.current,
+          settled,
+        );
+        const next = [...settled, ...placeholders];
+        syncUploadSessionStorage(settled, sessionMaterialIdsRef.current);
+        return next;
+      });
       setPendingFiles([]);
       setMeta((m) => ({ ...m, title: '', chapterId: '' }));
       if (fileRef.current) fileRef.current.value = '';
-      const succeeded = results.filter((r) => r.ok).length;
-      const failed = results.filter((r) => !r.ok);
-      if (failed.length === 0) {
-        toast({
-          title: succeeded === 1 ? 'Document uploaded' : `${succeeded} documents uploaded`,
-          description: 'Extracting chapters from your PDFs. Syllabus updates when indexing completes.',
+      return { placeholders };
+    },
+    onSuccess: (data, _vars, context) => {
+      const placeholders = context?.placeholders ?? [];
+      const enriched = data.materials.map((m) => {
+        const ph = placeholders.find((p) => p.fileName === m.fileName && p.fileSize === m.fileSize);
+        return enrichUploadedMaterial(m, ph);
+      });
+      setSessionQueue((prev) => {
+        const settled = prev.filter((p) => !isUploadPlaceholder(p));
+        const pendingPlaceholders = prev
+          .filter((p) => isUploadPlaceholder(p))
+          .filter(
+            (ph) => !enriched.some((e) => e.fileName === ph.fileName && e.fileSize === ph.fileSize),
+          );
+        sessionMaterialIdsRef.current = mergeSessionUploadIds(
+          sessionMaterialIdsRef.current,
+          [...settled, ...enriched],
+        );
+        const queue = buildSessionQueueFromIds(
+          sessionMaterialIdsRef.current,
+          settled,
+          enriched,
+        );
+        syncUploadSessionStorage(queue, sessionMaterialIdsRef.current);
+        return [...queue, ...pendingPlaceholders];
+      });
+
+      void queryClient.invalidateQueries({ queryKey: ['materials'] });
+      void queryClient.refetchQueries({ queryKey: ['materials'] });
+      queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+      queryClient.invalidateQueries({ queryKey: ['curriculum-all-classes'] });
+      queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+      void materialsApi
+        .reconcileSubjects(accessToken!)
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: ['materials'] });
+          queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+        })
+        .catch(() => {
+          /* reconcile optional if API old */
         });
-      } else {
+
+      const failed = data.fileResults.filter((r) => !r.ok);
+      if (failed.length > 0) {
         toast({
-          title: `${succeeded} uploaded, ${failed.length} failed`,
+          title: `${failed.length} upload${failed.length === 1 ? '' : 's'} failed`,
           description: failed.map((f) => `${f.fileName}: ${f.error}`).join('; '),
           variant: 'destructive',
+        });
+      } else if (enriched.some((m) => m.status === 'PENDING' || m.status === 'INDEXING')) {
+        toast({
+          title: 'Upload complete',
+          description: 'Indexing in the background — status updates in the queue below.',
         });
       }
     },
     onError: (e: Error) => {
-      setUploadProgress(null);
+      setSessionQueue((prev) => {
+        const next = prev.filter((p) => !isUploadPlaceholder(p));
+        sessionMaterialIdsRef.current = next.map((m) => m.id);
+        syncUploadSessionStorage(next, sessionMaterialIdsRef.current);
+        return next;
+      });
       toast({ title: 'Upload failed', description: e.message, variant: 'destructive' });
+    },
+    onSettled: () => {
+      setUploadProgress(null);
+    },
+  });
+
+  useEffect(() => {
+    if (!materials?.length || sessionMaterialIdsRef.current.length === 0) return;
+    if (uploadMutation.isPending) return;
+    const byId = new Map(materials.map((m) => [m.id, m]));
+    const matched = sessionMaterialIdsRef.current
+      .map((id) => byId.get(id))
+      .filter((m): m is Material => !!m);
+    if (matched.length === 0) return;
+    sessionMaterialIdsRef.current = mergeSessionUploadIds(sessionMaterialIdsRef.current, matched);
+    setSessionQueue((prev) => {
+      const ordered = buildSessionQueueFromIds(
+        sessionMaterialIdsRef.current,
+        prev,
+        matched,
+      );
+      syncUploadSessionStorage(ordered, sessionMaterialIdsRef.current);
+      return ordered;
+    });
+    if (matched.every((m) => m.status === 'READY' || m.status === 'FAILED')) {
+      queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+      queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+    }
+  }, [materials, queryClient, uploadMutation.isPending, user?.id]);
+
+  const deleteMutation = useMutation({
+    mutationFn: async (materialId: string) => {
+      const res = (await materialsApi.delete(accessToken!, materialId)) as {
+        deleted?: boolean;
+        id?: string;
+      };
+      if (res && 'deleted' in res && res.deleted === false) {
+        throw new Error('Server did not confirm deletion');
+      }
+      return materialId;
+    },
+    onMutate: async (materialId) => {
+      await queryClient.cancelQueries({ queryKey: ['materials'] });
+      const previous = queryClient.getQueryData<Material[]>(['materials']);
+      queryClient.setQueryData<Material[]>(['materials'], (old) =>
+        (old ?? []).filter((row) => row.id !== materialId),
+      );
+      setSessionQueue((old) => {
+        const next = old.filter((row) => row.id !== materialId);
+        sessionMaterialIdsRef.current = next.map((m) => m.id);
+        syncUploadSessionStorage(next, sessionMaterialIdsRef.current);
+        return next;
+      });
+      return { previous };
+    },
+    onSuccess: (_id, materialId) => {
+      setSessionQueue((old) => {
+        const next = old.filter((row) => row.id !== materialId);
+        sessionMaterialIdsRef.current = next.map((m) => m.id);
+        syncUploadSessionStorage(next, sessionMaterialIdsRef.current);
+        return next;
+      });
+      void queryClient.invalidateQueries({ queryKey: ['materials'] });
+      void queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+      void queryClient.invalidateQueries({ queryKey: ['curriculum-all-classes'] });
+      void queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+    },
+    onError: (e: Error, _id, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(['materials'], context.previous);
+      }
+      toast({
+        title: 'Could not delete',
+        description: e.message || 'Delete failed',
+        variant: 'destructive',
+      });
     },
   });
 
@@ -439,6 +772,13 @@ export default function MaterialsPage() {
             {uploadScope === 'FULL_BOOK' && (
               <p className="sm:col-span-2 rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
                 Chapters will be detected from your PDF and appear in Classes &amp; Batches after indexing.
+                {pendingFiles.length > 1 && (
+                  <>
+                    {' '}
+                    Multiple files: subject is auto-detected from each file name (English, Maths, Science…); the
+                    dropdown is used only when a name is unclear.
+                  </>
+                )}
               </p>
             )}
             {uploadScope === 'CHAPTER' && (
@@ -475,7 +815,13 @@ export default function MaterialsPage() {
             className="w-full"
             size="lg"
             disabled={!canSubmitUpload || uploadMutation.isPending}
-            onClick={() => uploadMutation.mutate()}
+            onClick={() =>
+              uploadMutation.mutate({
+                files: [...pendingFiles],
+                meta: { ...meta },
+                uploadScope,
+              })
+            }
           >
             {uploadMutation.isPending
               ? uploadProgress
@@ -489,15 +835,15 @@ export default function MaterialsPage() {
       </Card>
       )}
 
-      {isLoading ? (
-        <TableSkeleton rows={3} />
-      ) : (materials ?? []).length > 0 ? (
+      {sessionQueue.length > 0 ? (
         <div className="space-y-3">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            {teacherPortal ? 'Books for your subjects' : 'Your documents'} ({materials?.length})
+            Upload queue ({sessionQueue.length})
           </h2>
-          {(materials ?? []).map((m) => (
-            <Card key={m.id}>
+          {sessionQueue.map((m) => {
+            const placeholder = isUploadPlaceholder(m);
+            return (
+            <Card key={m.id} className={cn(placeholder && 'border-amber-500/30 bg-amber-500/[0.03]')}>
               <CardContent className="flex items-center gap-3 p-4">
                 <FileText className="h-5 w-5 shrink-0 text-primary" />
                 <div className="min-w-0 flex-1">
@@ -520,10 +866,22 @@ export default function MaterialsPage() {
                     <p className="text-xs text-destructive">{m.errorMessage}</p>
                   )}
                 </div>
-                <Badge variant={m.status === 'READY' ? 'success' : m.status === 'FAILED' ? 'destructive' : 'outline'}>
-                  {STATUS_LABEL[m.status] ?? m.status}
+                <Badge variant={materialStatusBadgeVariant(m.status)}>
+                  {placeholder ? (
+                    <>
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      {uploadMutation.isPending ? 'Uploading…' : 'Queued…'}
+                    </>
+                  ) : (
+                    <>
+                      {(m.status === 'PENDING' || m.status === 'INDEXING') && (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      )}
+                      {STATUS_LABEL[m.status] ?? m.status}
+                    </>
+                  )}
                 </Badge>
-                <Button size="icon" variant="ghost" title="View" disabled={openingId === m.id} onClick={async () => {
+                <Button size="icon" variant="ghost" title="View" disabled={placeholder || openingId === m.id} onClick={async () => {
                   setOpeningId(m.id);
                   try { await materialsApi.openFile(accessToken!, m.id); }
                   catch (e) { toast({ title: 'Could not open', description: e instanceof Error ? e.message : '', variant: 'destructive' }); }
@@ -531,15 +889,18 @@ export default function MaterialsPage() {
                 }}>
                   {openingId === m.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
                 </Button>
-                <Button size="icon" variant="ghost" title="Download" onClick={() => materialsApi.downloadFile(accessToken!, m.id, m.fileName)}>
+                <Button size="icon" variant="ghost" title="Download" disabled={placeholder} onClick={() => materialsApi.downloadFile(accessToken!, m.id, m.fileName)}>
                   <Download className="h-4 w-4" />
                 </Button>
                 {canUpload && (
-                <Button size="icon" variant="ghost" title="Re-index" onClick={async () => {
+                <Button size="icon" variant="ghost" title="Re-index" disabled={placeholder} onClick={async () => {
                   try {
                     await materialsApi.reindex(accessToken!, m.id);
                     queryClient.invalidateQueries({ queryKey: ['materials'] });
-                    toast({ title: 'Re-index queued', description: 'Document marked ready. Full PDF chapter extraction needs the NestJS API.' });
+                    toast({
+                      title: 'Re-index started',
+                      description: 'Processing in the background. Refresh status here when it shows Indexed or Failed.',
+                    });
                   } catch (e) {
                     toast({ title: 'Re-index failed', description: e instanceof Error ? e.message : 'Failed', variant: 'destructive' });
                   }
@@ -548,23 +909,29 @@ export default function MaterialsPage() {
                 </Button>
                 )}
                 {canDelete && (
-                <Button size="icon" variant="ghost" onClick={() => materialsApi.delete(accessToken!, m.id).then(() => queryClient.invalidateQueries({ queryKey: ['materials'] }))}>
-                  <Trash2 className="h-4 w-4 text-destructive" />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Delete"
+                  disabled={placeholder || (deleteMutation.isPending && deleteMutation.variables === m.id)}
+                  onClick={() => {
+                    if (!window.confirm(`Delete "${m.title}"? This removes indexed chapters for this book.`)) return;
+                    deleteMutation.mutate(m.id);
+                  }}
+                >
+                  {deleteMutation.isPending && deleteMutation.variables === m.id ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-destructive" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  )}
                 </Button>
                 )}
               </CardContent>
             </Card>
-          ))}
+          );
+          })}
         </div>
-      ) : (
-        <Card className="border-dashed">
-          <CardContent className="py-12 text-center text-muted-foreground">
-            {teacherPortal
-              ? 'No books for your assigned subjects yet. Ask your admin to upload NCERT books for your class and subject.'
-              : 'No documents yet. Upload a book for a class and subject — chapters will be extracted automatically.'}
-          </CardContent>
-        </Card>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -535,7 +535,14 @@ async def test_publish_succeeds_with_questions_and_candidates(client: AsyncClien
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["status"] == "PUBLISHED"
-    assert data["published_at"] is not None
+    assert data.get("published_at") or data.get("publishedAt")
+    published_start = data.get("startTime") or data.get("start_time") or data.get("starts_at")
+    assert published_start
+    pub_dt = datetime.fromisoformat(str(published_start).replace("Z", "+00:00"))
+    if pub_dt.tzinfo is None:
+        pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+    # Publish must keep the scheduled window, not rewrite start to "now".
+    assert abs((pub_dt - datetime.now(timezone.utc)).total_seconds()) > 30 * 60
 
 
 @pytest.mark.anyio

@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-CANDIDATE_VISIBLE_STATUSES = ("PUBLISHED", "IN_PROGRESS", "COMPLETED")
+CANDIDATE_VISIBLE_STATUSES = ("PUBLISHED", "COMPLETED")
 
 
 def parse_json(value):

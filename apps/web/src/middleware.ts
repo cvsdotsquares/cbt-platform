@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ACCESS_TOKEN_COOKIE, verifyAccessToken } from '@/lib/auth-cookies';
-import { isAdmin, isTeacherOnly, normalizeRoles } from '@/lib/roles';
 
 const PUBLIC_PATHS = ['/login', '/register', '/mfa', '/verify'];
 
@@ -15,8 +13,10 @@ function registrationAllowed(): boolean {
   );
 }
 
-function staffHome(roles: string[]) {
-  return isTeacherOnly(roles) ? '/dashboard/teacher' : '/dashboard';
+function registrationPageAllowed(request: NextRequest): boolean {
+  if (registrationAllowed()) return true;
+  const invite = request.nextUrl.searchParams.get('invite');
+  return Boolean(invite?.trim());
 }
 
 const STATIC_FILE = /\.(?:svg|png|jpg|jpeg|gif|webp|ico|woff2?)$/i;
@@ -28,28 +28,11 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (pathname === '/register' && !registrationAllowed()) {
+  if (pathname === '/register' && !registrationPageAllowed(request)) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  const accessToken = request.cookies.get(ACCESS_TOKEN_COOKIE)?.value;
-  let isAuthenticated = false;
-  let isAdminUser = false;
-  let roles: string[] = [];
-
-  if (accessToken) {
-    const payload = await verifyAccessToken(accessToken);
-    if (payload?.sub) {
-      isAuthenticated = true;
-      roles = normalizeRoles(payload.roles);
-      isAdminUser = isAdmin(roles);
-    }
-  }
-
   if (pathname === '/') {
-    if (isAuthenticated) {
-      return NextResponse.redirect(new URL(isAdminUser ? staffHome(roles) : '/my-exams', request.url));
-    }
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
@@ -57,30 +40,8 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (!isAuthenticated) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('redirect', pathname);
-    return NextResponse.redirect(loginUrl);
-  }
-
-  if (pathname.startsWith('/dashboard') && !isAdminUser) {
-    return NextResponse.redirect(new URL('/my-exams', request.url));
-  }
-
-  if ((pathname === '/my-exams' || pathname.startsWith('/exam/')) && isAdminUser) {
-    return NextResponse.redirect(new URL(staffHome(roles), request.url));
-  }
-
-  if (pathname === '/help' || pathname.startsWith('/help/')) {
-    if (isAdminUser) {
-      return NextResponse.redirect(new URL('/dashboard/guide', request.url));
-    }
-  }
-
-  if (pathname === '/dashboard/guide' && !isAdminUser) {
-    return NextResponse.redirect(new URL('/help', request.url));
-  }
-
+  // Browser auth is tab-scoped in sessionStorage, which middleware cannot read.
+  // Client layouts and auth hooks enforce authentication and role access.
   return NextResponse.next();
 }
 

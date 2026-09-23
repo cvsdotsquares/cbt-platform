@@ -79,6 +79,19 @@ export class AiController {
     });
   }
 
+  @Post('answers/evaluate')
+  @RequirePermissions(Permission.RESULT_EVALUATE)
+  @ApiOperation({ summary: 'Evaluate a subjective answer with AI' })
+  evaluateAnswer(@Body() body: {
+    question: string;
+    referenceAnswer?: string;
+    rubric?: string;
+    answer: string;
+    maxMarks: number;
+  }) {
+    return this.aiService.gradeSubjective(body);
+  }
+
   @Get('insights/exam/:examId')
   @RequirePermissions(Permission.ANALYTICS_VIEW)
   @ApiOperation({ summary: 'AI-powered exam insights' })
@@ -162,6 +175,7 @@ export class AiController {
       syllabusScope?: string;
       durationMinutes?: number;
       assignToBatch?: boolean;
+      shuffleQuestions?: boolean;
     },
   ) {
     await this.assertTeacherCanGenerate(user, {

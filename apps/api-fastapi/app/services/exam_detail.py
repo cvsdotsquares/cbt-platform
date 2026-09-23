@@ -55,7 +55,13 @@ async def get_exam_detail(db: AsyncSession, exam_id: str, tenant_id: str) -> dic
                        qv.negative_marks AS version_negative_marks
                 FROM exam_questions eq
                 JOIN questions q ON q.id = eq.question_id
-                LEFT JOIN question_versions qv ON qv.question_id = q.id AND qv.version_number = 1
+                LEFT JOIN question_versions qv
+                  ON qv.question_id = q.id
+                 AND qv.version_number = (
+                      SELECT MAX(latest.version_number)
+                      FROM question_versions latest
+                      WHERE latest.question_id = q.id
+                 )
                 WHERE eq.section_id = :section_id
                 ORDER BY eq.order_index
                 """
@@ -102,7 +108,16 @@ async def get_exam_detail(db: AsyncSession, exam_id: str, tenant_id: str) -> dic
         )
 
     registrations = await db.execute(
-        text("SELECT candidate_id FROM exam_registrations WHERE exam_id = :exam_id"),
+        text(
+            """
+            SELECT er.candidate_id, c.registration_number, u.first_name, u.last_name
+            FROM exam_registrations er
+            JOIN candidates c ON c.id = er.candidate_id
+            JOIN users u ON u.id = c.user_id
+            WHERE er.exam_id = :exam_id
+            ORDER BY er.registered_at ASC
+            """
+        ),
         {"exam_id": exam_id},
     )
 
@@ -142,7 +157,20 @@ async def get_exam_detail(db: AsyncSession, exam_id: str, tenant_id: str) -> dic
         "createdAt": exam["created_at"].isoformat() if exam["created_at"] else None,
         "updatedAt": exam["updated_at"].isoformat() if exam["updated_at"] else None,
         "sections": sections,
-        "registrations": [{"candidateId": row[0]} for row in reg_rows],
+        "registrations": [
+            {
+                "candidateId": row["candidate_id"],
+                "candidate": {
+                    "id": row["candidate_id"],
+                    "registrationNumber": row["registration_number"],
+                    "user": {
+                        "firstName": row["first_name"] or "",
+                        "lastName": row["last_name"] or "",
+                    },
+                },
+            }
+            for row in (r._mapping for r in reg_rows)
+        ],
         "aiTestConfig": (
             {
                 "batchId": config["batch_id"],

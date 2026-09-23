@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -8,11 +9,12 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { examsApi, type ExamListItem } from '@/lib/api';
+import { curriculumApi, examsApi, type ExamListItem } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { usePermissions } from '@/hooks/use-permissions';
 import { Permission } from '@cbt/shared';
 import { PageHeader } from '@/components/layout/page-header';
+import { HorizontalTabScroller, ScrollableListPanel } from '@/components/layout/horizontal-tab-scroller';
 import { EmptyState } from '@/components/layout/data-table';
 import { ExamAssignCandidatesDialog } from '@/components/admin/exam-assign-candidates-dialog';
 import { toast } from '@/hooks/use-toast';
@@ -22,14 +24,18 @@ import {
 import {
   DEFAULT_EXAM_TIMEZONE,
   DEFAULT_PAST_START_GRACE_MINUTES,
+  addMinutesToLocalDateTime,
+  getDefaultExamScheduleValues,
   localDateTimeToUtcIso,
   nowLocalDateTimeInput,
   parseExamDateTime,
+  utcIsoToLocalDateTimeInput,
   validateExamSchedule,
 } from '@cbt/shared';
-import { EXAM_TIMEZONE_OPTIONS, formatExamTimeRange, utcIsoToLocalDateTimeInput } from '@/lib/exam-dates';
-import { FileText, Users, Clock, HelpCircle, GraduationCap } from 'lucide-react';
+import { EXAM_TIMEZONE_OPTIONS, formatExamTimeRange } from '@/lib/exam-dates';
+import { FileText, Users, Clock, HelpCircle, GraduationCap, Search } from 'lucide-react';
 import { TableSkeleton } from '@/components/ui/skeleton';
+import { cn } from '@/lib/utils';
 
 type ExamItem = ExamListItem;
 
@@ -37,35 +43,35 @@ function questionCount(exam: ExamItem) {
   return (exam.sections || []).reduce((sum, s) => sum + (s._count?.questions ?? 0), 0);
 }
 
-function addMinutesToLocalDateTime(local: string, minutes: number): string {
-  if (!local) return '';
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(local);
-  if (!match) return local;
-  const d = new Date(
-    Number(match[1]),
-    Number(match[2]) - 1,
-    Number(match[3]),
-    Number(match[4]),
-    Number(match[5]),
-  );
-  d.setMinutes(d.getMinutes() + minutes);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+type ClassTab = 'all' | string;
+
+function examClassId(exam: ExamItem): string | undefined {
+  return exam.aiTestConfig?.batch?.academicClass?.id;
 }
 
 export default function ExamsPage() {
+  const searchParams = useSearchParams();
+  const highlightExamId = searchParams.get('exam');
   const { accessToken } = useRequireAuth(true);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const { can } = usePermissions();
   const queryClient = useQueryClient();
   const [candidatesDialog, setCandidatesDialog] = useState<{ examId: string; title: string } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string; code: string } | null>(null);
   const [scheduleTarget, setScheduleTarget] = useState<ExamItem | null>(null);
   const [scheduleAlert, setScheduleAlert] = useState<string | null>(null);
-  const [scheduleForm, setScheduleForm] = useState({
-    startTime: '',
-    endTime: '',
-    timezone: DEFAULT_EXAM_TIMEZONE,
-    durationMinutes: 30,
+  const [searchTerm, setSearchTerm] = useState('');
+  const [classTab, setClassTab] = useState<ClassTab>('all');
+  const [scheduleForm, setScheduleForm] = useState(() => {
+    const defaults = getDefaultExamScheduleValues(DEFAULT_EXAM_TIMEZONE, 30, new Date());
+    return {
+      startTime: defaults.startTime,
+      endTime: defaults.endTime,
+      timezone: defaults.timezone,
+      durationMinutes: defaults.durationMinutes,
+      passingScore: 40,
+      maxAttempts: 1,
+    };
   });
 
   const { data, isLoading } = useQuery({
@@ -73,6 +79,26 @@ export default function ExamsPage() {
     queryFn: () => examsApi.list(accessToken!),
     enabled: !!accessToken,
   });
+
+  const { data: classes } = useQuery({
+    queryKey: ['curriculum-classes'],
+    queryFn: () => curriculumApi.getClasses(accessToken!) as Promise<{ id: string; level: number; name: string }[]>,
+    enabled: !!accessToken,
+  });
+
+  const sortedClasses = useMemo(
+    () => [...(classes ?? [])].sort((a, b) => a.level - b.level),
+    [classes],
+  );
+
+  useEffect(() => {
+    if (!highlightExamId) return;
+    setHighlightedId(highlightExamId);
+    const el = document.getElementById(`exam-row-${highlightExamId}`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const t = setTimeout(() => setHighlightedId(null), 6000);
+    return () => clearTimeout(t);
+  }, [highlightExamId, data]);
 
   const scheduleWindowMinutes = useMemo(() => {
     if (!scheduleForm.startTime || !scheduleForm.endTime) return null;
@@ -98,6 +124,7 @@ export default function ExamsPage() {
       const end = parseExamDateTime(scheduleForm.endTime, scheduleForm.timezone);
       return validateExamSchedule(start, end, scheduleForm.durationMinutes, {
         disallowPastStart: true,
+        timeZone: scheduleForm.timezone,
       });
     } catch {
       return { ok: false as const, message: 'Start and end times must be valid dates.' };
@@ -108,8 +135,42 @@ export default function ExamsPage() {
     if (!scheduleForm.startTime) return false;
     try {
       const start = parseExamDateTime(scheduleForm.startTime, scheduleForm.timezone);
+      const now = new Date();
       const graceMs = DEFAULT_PAST_START_GRACE_MINUTES * 60_000;
-      return start.getTime() < Date.now() - graceMs;
+      const startLocal = new Intl.DateTimeFormat('en-US', {
+        timeZone: scheduleForm.timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(start);
+      const nowLocal = new Intl.DateTimeFormat('en-US', {
+        timeZone: scheduleForm.timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(now);
+      const get = (parts: Intl.DateTimeFormatPart[], type: string) => parts.find((p) => p.type === type)?.value ?? '0';
+      const startWall = Date.UTC(
+        Number(get(startLocal, 'year')),
+        Number(get(startLocal, 'month')) - 1,
+        Number(get(startLocal, 'day')),
+        Number(get(startLocal, 'hour')),
+        Number(get(startLocal, 'minute')),
+      );
+      const nowWall = Date.UTC(
+        Number(get(nowLocal, 'year')),
+        Number(get(nowLocal, 'month')) - 1,
+        Number(get(nowLocal, 'day')),
+        Number(get(nowLocal, 'hour')),
+        Number(get(nowLocal, 'minute')),
+      );
+      return startWall < nowWall - graceMs;
     } catch {
       return false;
     }
@@ -145,7 +206,7 @@ export default function ExamsPage() {
   const startTimeMin = nowLocalDateTimeInput(scheduleForm.timezone);
 
   const endTimeMin = scheduleForm.startTime
-    ? addMinutesToLocalDateTime(scheduleForm.startTime, 1)
+    ? addMinutesToLocalDateTime(scheduleForm.startTime, 1, scheduleForm.timezone)
     : undefined;
 
   const publishMutation = useMutation({
@@ -173,6 +234,8 @@ export default function ExamsPage() {
       endTime: localDateTimeToUtcIso(scheduleForm.endTime, scheduleForm.timezone),
       timezone: scheduleForm.timezone,
       durationMinutes: scheduleForm.durationMinutes,
+      passingScore: scheduleForm.passingScore,
+      maxAttempts: scheduleForm.maxAttempts,
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['exams'] });
@@ -187,16 +250,25 @@ export default function ExamsPage() {
   });
 
   function openScheduleEdit(exam: ExamItem) {
-    const tz = exam.timezone || DEFAULT_EXAM_TIMEZONE;
     const duration = typeof exam.settings?.durationMinutes === 'number' && exam.settings.durationMinutes > 0
       ? exam.settings.durationMinutes
       : 30;
+    const passingScore = typeof exam.settings?.passingScore === 'number' ? exam.settings.passingScore : 40;
+    const maxAttempts = typeof exam.settings?.maxAttempts === 'number' ? exam.settings.maxAttempts : 1;
+    const tz = exam.timezone || DEFAULT_EXAM_TIMEZONE;
+    const defaults = getDefaultExamScheduleValues(tz, duration, new Date());
+    const startMs = exam.startTime ? new Date(exam.startTime).getTime() : NaN;
+    const keepExistingStart = Number.isFinite(startMs) && startMs > Date.now() + 60_000;
     setScheduleAlert(null);
     setScheduleForm({
-      startTime: utcIsoToLocalDateTimeInput(exam.startTime, tz),
-      endTime: utcIsoToLocalDateTimeInput(exam.endTime, tz),
+      startTime: keepExistingStart ? utcIsoToLocalDateTimeInput(exam.startTime, tz) : defaults.startTime,
+      endTime: keepExistingStart && exam.endTime
+        ? utcIsoToLocalDateTimeInput(exam.endTime, tz)
+        : defaults.endTime,
       timezone: tz,
       durationMinutes: duration,
+      passingScore,
+      maxAttempts,
     });
     setScheduleTarget(exam);
   }
@@ -208,7 +280,7 @@ export default function ExamsPage() {
       return {
         ...prev,
         startTime: value,
-        endTime: value ? addMinutesToLocalDateTime(value, duration) : prev.endTime,
+        endTime: value ? addMinutesToLocalDateTime(value, duration, prev.timezone) : prev.endTime,
       };
     });
   }
@@ -220,7 +292,7 @@ export default function ExamsPage() {
       ...prev,
       durationMinutes: duration,
       endTime: prev.startTime
-        ? addMinutesToLocalDateTime(prev.startTime, duration)
+        ? addMinutesToLocalDateTime(prev.startTime, duration, prev.timezone)
         : prev.endTime,
     }));
   }
@@ -249,9 +321,40 @@ export default function ExamsPage() {
     return true;
   }
 
-  if (isLoading) return <TableSkeleton rows={3} cols={1} />;
+  const items = useMemo(
+    () => (data?.items || []).filter((exam) => exam.aiTestConfig) as ExamItem[],
+    [data],
+  );
 
-  const items: ExamItem[] = (data?.items || []).filter((exam) => exam.aiTestConfig);
+  const classTabCounts = useMemo(() => {
+    const byClass = new Map<string, number>();
+    for (const exam of items) {
+      const id = examClassId(exam);
+      if (id) byClass.set(id, (byClass.get(id) ?? 0) + 1);
+    }
+    return byClass;
+  }, [items]);
+
+  const itemsForTab = useMemo(() => {
+    if (classTab === 'all') return items;
+    return items.filter((exam) => examClassId(exam) === classTab);
+  }, [items, classTab]);
+
+  const activeClassMeta = classTab !== 'all' ? sortedClasses.find((c) => c.id === classTab) : undefined;
+
+  const filteredItems = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return itemsForTab;
+
+    return itemsForTab.filter((exam) => {
+      const batch = exam.aiTestConfig?.batch;
+      const batchText = [batch?.name, batch?.academicClass?.name].filter(Boolean).join(' ');
+      const haystack = [exam.title, exam.code, batchText].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [itemsForTab, searchTerm]);
+
+  if (isLoading) return <TableSkeleton rows={3} cols={1} />;
 
   return (
     <div className="space-y-8">
@@ -262,15 +365,85 @@ export default function ExamsPage() {
         badge="NCERT · Classes 9–12"
       />
 
-      <div className="space-y-3">
-        {items.map((exam) => {
+      <div className="space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+          <HorizontalTabScroller className="min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => setClassTab('all')}
+              className="shrink-0"
+              className={cn(
+                'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                classTab === 'all'
+                  ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                  : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+              )}
+            >
+              All classes
+              {items.length > 0 && (
+                <span className={cn(
+                  'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                  classTab === 'all' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                )}>
+                  {items.length}
+                </span>
+              )}
+            </button>
+            {sortedClasses.map((cls) => {
+              const active = classTab === cls.id;
+              const count = classTabCounts.get(cls.id) ?? 0;
+              return (
+                <button
+                  key={cls.id}
+                  type="button"
+                  onClick={() => setClassTab(cls.id)}
+                  className={cn(
+                    'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                    active
+                      ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                      : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+                  )}
+                >
+                  {cls.name}
+                  {count > 0 && (
+                    <span className={cn(
+                      'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                      active ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                    )}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </HorizontalTabScroller>
+          <div className="relative w-full max-w-sm sm:w-auto sm:flex-1 sm:max-w-sm">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search class tests..."
+              className="pl-9"
+            />
+          </div>
+        </div>
+
+        <ScrollableListPanel maxHeightClass="max-h-[min(70vh,720px)]" className="space-y-4">
+        {filteredItems.map((exam) => {
           const qCount = questionCount(exam);
           const cCount = exam._count?.registrations ?? 0;
           const batch = exam.aiTestConfig?.batch;
           const readyToPublish = qCount > 0 && cCount > 0;
 
           return (
-            <Card key={exam.id} className="surface-card group">
+            <Card
+              key={exam.id}
+              id={`exam-row-${exam.id}`}
+              className={cn(
+                'surface-card group transition-shadow',
+                highlightedId === exam.id && 'ring-2 ring-primary shadow-lg',
+              )}
+            >
               <CardContent className="flex flex-wrap items-center justify-between gap-4 p-6">
                 <div className="flex items-start gap-4">
                   <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary transition-transform group-hover:scale-105">
@@ -290,7 +463,7 @@ export default function ExamsPage() {
                     <p className="mt-1 text-sm text-muted-foreground">{exam.code}</p>
                     <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
                       <span className="flex items-center gap-1"><HelpCircle className="h-3 w-3" />{qCount} question{qCount === 1 ? '' : 's'}</span>
-                      <span className="flex items-center gap-1"><Users className="h-3 w-3" />{cCount} candidate{cCount === 1 ? '' : 's'}</span>
+                      <span className="flex items-center gap-1"><Users className="h-3 w-3" />{cCount} student{cCount === 1 ? '' : 's'}</span>
                       <span className="flex items-center gap-1">
                         <Clock className="h-3 w-3" />
                         {formatExamTimeRange(exam.startTime, exam.endTime, exam.timezone || DEFAULT_EXAM_TIMEZONE)}
@@ -308,13 +481,13 @@ export default function ExamsPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  {can(Permission.EXAM_UPDATE) && exam.status !== 'COMPLETED' && (
+                    <Button size="sm" variant="outline" onClick={() => openScheduleEdit(exam)}>
+                      Edit Schedule
+                    </Button>
+                  )}
                   {exam.status === 'DRAFT' && (
                     <>
-                      {can(Permission.EXAM_UPDATE) && (
-                        <Button size="sm" variant="outline" onClick={() => openScheduleEdit(exam)}>
-                          Edit Schedule
-                        </Button>
-                      )}
                       {can(Permission.EXAM_ASSIGN_CANDIDATES) && batch && (
                       <Button
                         size="sm"
@@ -343,7 +516,7 @@ export default function ExamsPage() {
                       disabled={!canDeleteExam(exam)}
                       title={
                         !canDeleteExam(exam)
-                          ? 'Cannot delete: exam is completed or candidates have taken it'
+                          ? 'Cannot delete: exam is completed or students have taken it'
                           : 'Permanently delete this exam'
                       }
                       onClick={() => setDeleteTarget({ id: exam.id, title: exam.title, code: exam.code })}
@@ -356,20 +529,47 @@ export default function ExamsPage() {
             </Card>
           );
         })}
-        {!items.length && (
+        {!filteredItems.length && (
           <Card className="surface-card">
             <EmptyState
-              icon={FileText}
-              title="No class tests yet"
-              description="Create a NCERT-aligned test from uploaded books — it will appear here for scheduling and publishing to your batch."
+              icon={itemsForTab.length === 0 && items.length > 0 ? GraduationCap : FileText}
+              title={
+                !items.length
+                  ? 'No class tests yet'
+                  : itemsForTab.length === 0
+                    ? activeClassMeta
+                      ? `No class tests for ${activeClassMeta.name}`
+                      : 'No class tests in this class'
+                    : 'No matching class tests'
+              }
+              description={
+                !items.length
+                  ? 'Create a NCERT-aligned test from uploaded books — it will appear here for scheduling and publishing to your batch.'
+                  : itemsForTab.length === 0
+                    ? 'Create a class test for this grade, or switch to All classes to see every test.'
+                    : 'Try a different class test name, code, or batch.'
+              }
             />
-            <div className="flex justify-center pb-8">
-              <Button asChild>
-                <Link href="/dashboard/ai-tests">Create Class Test</Link>
-              </Button>
+            <div className="flex flex-wrap justify-center gap-3 pb-8">
+              {!items.length && (
+                <Button asChild>
+                  <Link href="/dashboard/ai-tests">Create Class Test</Link>
+                </Button>
+              )}
+              {items.length > 0 && itemsForTab.length === 0 && (
+                <>
+                  <Button variant="outline" onClick={() => setClassTab('all')}>
+                    View all classes
+                  </Button>
+                  <Button asChild>
+                    <Link href="/dashboard/ai-tests">Create Class Test</Link>
+                  </Button>
+                </>
+              )}
             </div>
           </Card>
         )}
+        </ScrollableListPanel>
       </div>
 
       {candidatesDialog && accessToken && (
@@ -413,6 +613,38 @@ export default function ExamsPage() {
                 How long each student gets once they start the test.
               </p>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>Pass score (%)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={scheduleForm.passingScore}
+                  onChange={(e) =>
+                    setScheduleForm((prev) => ({
+                      ...prev,
+                      passingScore: Math.min(100, Math.max(0, parseInt(e.target.value, 10) || 0)),
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Max attempts</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={scheduleForm.maxAttempts}
+                  onChange={(e) =>
+                    setScheduleForm((prev) => ({
+                      ...prev,
+                      maxAttempts: Math.min(10, Math.max(1, parseInt(e.target.value, 10) || 1)),
+                    }))
+                  }
+                />
+              </div>
+            </div>
             <div className="space-y-2">
               <Label>Start Time</Label>
               <Input
@@ -424,6 +656,9 @@ export default function ExamsPage() {
                   updateStartTime(startTimeMin && next && next < startTimeMin ? startTimeMin : next);
                 }}
               />
+              <p className="text-xs text-muted-foreground">
+                Students cannot start until this time. The default is the next 5-minute mark, not the current minute.
+              </p>
             </div>
             <div className="space-y-2">
               <Label>End Time</Label>
@@ -451,8 +686,21 @@ export default function ExamsPage() {
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={scheduleForm.timezone}
                 onChange={(e) => {
+                  const nextTimezone = e.target.value;
                   setScheduleAlert(null);
-                  setScheduleForm({ ...scheduleForm, timezone: e.target.value });
+                  setScheduleForm((prev) => {
+                    if (!prev.startTime) return { ...prev, timezone: nextTimezone };
+
+                    const startUtc = localDateTimeToUtcIso(prev.startTime, prev.timezone);
+                    const endUtc = prev.endTime ? localDateTimeToUtcIso(prev.endTime, prev.timezone) : null;
+
+                    return {
+                      ...prev,
+                      timezone: nextTimezone,
+                      startTime: utcIsoToLocalDateTimeInput(startUtc, nextTimezone),
+                      endTime: endUtc ? utcIsoToLocalDateTimeInput(endUtc, nextTimezone) : prev.endTime,
+                    };
+                  });
                 }}
               >
                 {EXAM_TIMEZONE_OPTIONS.map((opt) => (
@@ -470,7 +718,6 @@ export default function ExamsPage() {
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setScheduleTarget(null)}>Cancel</Button>
             <Button
               disabled={
                 scheduleMutation.isPending
@@ -496,7 +743,6 @@ export default function ExamsPage() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
             <Button
               variant="destructive"
               disabled={deleteMutation.isPending}

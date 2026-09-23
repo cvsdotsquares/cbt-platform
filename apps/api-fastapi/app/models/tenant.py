@@ -23,7 +23,7 @@ class TenantIsolationMode:
     """Tenant isolation mode constants"""
     SCHEMA = "SCHEMA"
     DATABASE = "DATABASE"
-    ROW = "ROW"
+    ROW_LEVEL = "ROW_LEVEL"
 
 
 class Tenant(TimestampMixin, Base):
@@ -102,42 +102,42 @@ class Tenant(TimestampMixin, Base):
         "User",
         back_populates="tenant",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
     roles: Mapped[list["Role"]] = relationship(
         "Role",
         back_populates="tenant",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
     candidates: Mapped[list["Candidate"]] = relationship(
         "Candidate",
         back_populates="tenant",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
     topics: Mapped[list["Topic"]] = relationship(
         "Topic",
         back_populates="tenant",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
     exams: Mapped[list["Exam"]] = relationship(
         "Exam",
         back_populates="tenant",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
     questions: Mapped[list["Question"]] = relationship(
         "Question",
         back_populates="tenant",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
     def __repr__(self) -> str:

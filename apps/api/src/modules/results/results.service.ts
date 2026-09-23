@@ -4,6 +4,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { parsePage, parseLimit } from '../../common/utils/pagination.util';
 import { LearningService } from '../learning/learning.service';
 import { isTeacherScoped } from '../../common/utils/teacher-scope.util';
+import { AiService } from '../ai/ai.service';
+import { gradeSubjectiveByKeywords } from '../../common/utils/subjective-grading.util';
 
 const RESULT_STAFF_ROLES: Role[] = [
   Role.SUPER_ADMIN,
@@ -18,10 +20,12 @@ const RESULT_STAFF_ROLES: Role[] = [
 @Injectable()
 export class ResultsService {
   private readonly subjectiveTypes = ['SUBJECTIVE', 'CASE_STUDY', 'CODING', 'AUDIO', 'VIDEO'];
+  private readonly manualGradeTypes = ['SUBJECTIVE', 'CASE_STUDY', 'CODING', 'AUDIO', 'VIDEO', 'MSQ'];
 
   constructor(
     private prisma: PrismaService,
     private learningService: LearningService,
+    private aiService: AiService,
   ) {}
 
   /** Teachers may only manage results for exams they created. */
@@ -62,6 +66,7 @@ export class ResultsService {
 
     let totalScore = 0;
     let maxScore = 0;
+    let hasUngraded = false;
 
     const examQuestions = await this.prisma.examQuestion.findMany({
       where: { examId: session.examId },
@@ -78,9 +83,62 @@ export class ResultsService {
       if (!version) continue;
 
       if (this.subjectiveTypes.includes(response.question.type)) {
-        if (response.marksAwarded != null) {
+        if (response.marksAwarded == null && response.answer) {
+          const content = (version.content || {}) as { text?: string };
+          const correct = (version.correctAnswer || {}) as { value?: unknown; rubric?: string };
+          const candidate = this.normalizeAnswer(response.answer).join(' ') || '';
+
+          const openEnded = ['SUBJECTIVE', 'CASE_STUDY'].includes(response.question.type);
+          if (openEnded) {
+            const keywordGrade = gradeSubjectiveByKeywords(
+              candidate,
+              version.correctAnswer,
+              version.marks,
+            );
+            if (keywordGrade.marksAwarded != null) {
+              await this.prisma.sessionResponse.update({
+                where: { id: response.id },
+                data: {
+                  isCorrect: keywordGrade.isCorrect,
+                  marksAwarded: keywordGrade.marksAwarded,
+                },
+              });
+              totalScore += keywordGrade.marksAwarded;
+              continue;
+            }
+          }
+
+          try {
+            const graded = await this.aiService.gradeSubjective({
+              question: content.text || response.question.title || 'Question',
+              referenceAnswer: correct.value == null ? undefined : String(correct.value),
+              rubric: correct.rubric,
+              answer: candidate,
+              maxMarks: version.marks,
+            });
+            if (graded.source === 'openai') {
+              await this.prisma.sessionResponse.update({
+                where: { id: response.id },
+                data: { isCorrect: graded.isCorrect, marksAwarded: graded.marksAwarded },
+              });
+              totalScore += graded.marksAwarded;
+            } else {
+              hasUngraded = true;
+            }
+          } catch {
+            // Keep the response in manual review when the grading provider is unavailable.
+            hasUngraded = true;
+          }
+        } else if (response.marksAwarded != null) {
           totalScore += response.marksAwarded;
+        } else {
+          hasUngraded = true;
         }
+        continue;
+      }
+
+      if (response.marksAwarded != null && response.question.type === 'MSQ') {
+        totalScore += response.marksAwarded;
         continue;
       }
 
@@ -107,10 +165,6 @@ export class ResultsService {
     }
 
     const percentage = maxScore > 0 ? (totalScore / maxScore) * 100 : 0;
-    const hasUngraded = session.responses.some(
-      (r) => this.subjectiveTypes.includes(r.question.type) && r.marksAwarded == null && r.answer,
-    );
-
     return this.prisma.examResult.upsert({
       where: { sessionId },
       create: {
@@ -342,6 +396,34 @@ export class ResultsService {
       const options = this.normalizeOptions(version?.options);
       const correctAnswer = this.normalizeAnswer(version?.correctAnswer);
       const candidateAnswer = this.normalizeAnswer(response?.answer);
+      const answered = candidateAnswer.length > 0;
+      const maxMarks = version?.marks ?? eq.marks ?? 0;
+      let isCorrect = response?.isCorrect ?? null;
+      if (isCorrect == null && answered) {
+        isCorrect = this.inferIsCorrect(eq.question.type, candidateAnswer, correctAnswer);
+      }
+      let marksAwarded = response?.marksAwarded ?? null;
+      const qtype = (eq.question.type || 'MCQ').toUpperCase();
+      if (
+        marksAwarded == null
+        && answered
+        && (qtype === 'SUBJECTIVE' || qtype === 'CASE_STUDY')
+      ) {
+        const keywordGrade = gradeSubjectiveByKeywords(
+          candidateAnswer.join(' '),
+          version?.correctAnswer,
+          maxMarks,
+        );
+        if (keywordGrade.marksAwarded != null) {
+          marksAwarded = keywordGrade.marksAwarded;
+          isCorrect = keywordGrade.isCorrect;
+        }
+      }
+      if (marksAwarded == null) {
+        if (!answered) marksAwarded = 0;
+        else if (isCorrect === true) marksAwarded = maxMarks;
+        else if (isCorrect === false) marksAwarded = 0;
+      }
 
       return {
         number: index + 1,
@@ -355,16 +437,17 @@ export class ResultsService {
         candidateAnswerLabel: this.formatAnswerLabel(candidateAnswer, options),
         correctAnswer,
         correctAnswerLabel: this.formatAnswerLabel(correctAnswer, options),
-        isCorrect: response?.isCorrect ?? null,
-        marksAwarded: response?.marksAwarded ?? null,
-        maxMarks: version?.marks ?? eq.marks ?? 0,
+        isCorrect,
+        marksAwarded,
+        maxMarks,
         explanation: version?.explanation ?? null,
-        answered: candidateAnswer.length > 0,
+        answered,
       };
     });
 
     return {
       resultId: result.id,
+      sessionId: result.sessionId,
       examTitle: result.exam.title,
       examCode: result.exam.code,
       candidateName: `${result.candidate.user.firstName} ${result.candidate.user.lastName}`,
@@ -374,6 +457,33 @@ export class ResultsService {
       published: result.published,
       questions,
     };
+  }
+
+  private inferIsCorrect(
+    questionType: string,
+    given: string[],
+    expected: string[],
+  ): boolean | null {
+    if (!given.length || !expected.length) return null;
+    const qtype = (questionType || 'MCQ').toUpperCase();
+    if (qtype === 'MSQ') {
+      const expSet = new Set(expected.map((a) => a.toLowerCase()));
+      const givSet = new Set(given.map((a) => a.toLowerCase()));
+      return (
+        expected.every((a) => givSet.has(a.toLowerCase()))
+        && given.every((a) => expSet.has(a.toLowerCase()))
+      );
+    }
+    if (qtype === 'NUMERICAL') {
+      const expNum = Number(expected[0]);
+      const givNum = Number(given[0]);
+      if (Number.isNaN(expNum) || Number.isNaN(givNum)) return false;
+      return Math.abs(expNum - givNum) < 0.001;
+    }
+    if (['SUBJECTIVE', 'CASE_STUDY', 'CODING', 'AUDIO', 'VIDEO'].includes(qtype)) {
+      return null;
+    }
+    return given[0].trim().toLowerCase() === expected[0].trim().toLowerCase();
   }
 
   private normalizeOptions(options: unknown): Record<string, string> {
@@ -419,6 +529,11 @@ export class ResultsService {
     });
     const settings = (result.exam.settings || {}) as Record<string, unknown>;
     const passingScore = (settings.passingScore as number) ?? 40;
+    if (result.percentage < passingScore) {
+      throw new ForbiddenException(
+        'Certificates are only available when you meet the exam pass score',
+      );
+    }
 
     return {
       certificateId: result.id,
@@ -497,8 +612,8 @@ export class ResultsService {
       include: { question: true },
     });
     if (!response) throw new NotFoundException('Response not found');
-    if (!this.subjectiveTypes.includes(response.question.type)) {
-      throw new BadRequestException('Only subjective responses can be manually graded');
+    if (!this.manualGradeTypes.includes(response.question.type)) {
+      throw new BadRequestException('This question type cannot be manually graded');
     }
 
     const version = await this.prisma.questionVersion.findFirst({
@@ -514,7 +629,7 @@ export class ResultsService {
       where: { sessionId_questionId: { sessionId, questionId } },
       data: {
         marksAwarded,
-        isCorrect: marksAwarded > 0,
+        isCorrect: marksAwarded >= maxMarks,
       },
     });
 

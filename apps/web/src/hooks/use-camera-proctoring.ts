@@ -1,15 +1,14 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { getProctoringSocket } from '@/lib/socket';
+import { publishLiveFrame } from '@/lib/proctoring-live-feed';
+import { useAuthStore } from '@/stores/auth-store';
 
 interface UseCameraProctoringOptions {
   sessionId: string;
   enabled?: boolean;
   intervalMs?: number;
 }
-
-type ProctoringStatus = { riskScore: number; faceDetected?: boolean };
 
 export function useCameraProctoring({ sessionId, enabled = true, intervalMs = 3000 }: UseCameraProctoringOptions) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -45,6 +44,7 @@ export function useCameraProctoring({ sessionId, enabled = true, intervalMs = 30
       }
       setActive(true);
       setError('');
+      setFaceDetected(true);
     } catch {
       setError('Camera access denied. Proctoring requires webcam permission.');
       setActive(false);
@@ -54,31 +54,20 @@ export function useCameraProctoring({ sessionId, enabled = true, intervalMs = 30
   useEffect(() => {
     if (!enabled || !sessionId) return;
 
-    startCamera();
-    const socket = getProctoringSocket();
-    if (!socket) return;
-    socket.connect();
+    let interval: ReturnType<typeof setInterval> | undefined;
 
-    const interval = setInterval(() => {
-      const thumbnail = captureFrame();
-      if (!thumbnail || !socket.connected) return;
-
-      socket.emit(
-        'proctoring:frame',
-        { sessionId, thumbnail, metadata: { ts: Date.now() } },
-        (response: { event?: string; data?: ProctoringStatus } | undefined) => {
-          if (response?.event === 'proctoring:status' && response.data) {
-            setRiskScore(response.data.riskScore);
-            if (response.data.faceDetected !== undefined) {
-              setFaceDetected(response.data.faceDetected);
-            }
-          }
-        },
-      );
-    }, intervalMs);
+    void startCamera().then(() => {
+      interval = setInterval(() => {
+        const thumbnail = captureFrame();
+        if (!thumbnail) return;
+        const token = useAuthStore.getState().accessToken;
+        if (!token) return;
+        void publishLiveFrame(token, sessionId, thumbnail, 'camera');
+      }, intervalMs);
+    });
 
     return () => {
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, [enabled, sessionId, intervalMs, startCamera, captureFrame]);

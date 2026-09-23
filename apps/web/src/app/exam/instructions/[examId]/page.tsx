@@ -23,7 +23,7 @@ type ExamInstructions = {
   timezone?: string;
   settings?: { durationMinutes: number; passingScore: number; negativeMarking: boolean };
   securityPolicy?: { fullscreen?: boolean; fullscreenRequired?: boolean; blockCopyPaste?: boolean; proctoringEnabled?: boolean };
-  registration: { sessions?: { status: string }[] };
+  registration: { sessions?: { status: string }[]; submittedAttemptCount?: number };
 };
 
 export default function ExamInstructionsPage() {
@@ -58,8 +58,14 @@ export default function ExamInstructionsPage() {
   const security = normalizeSecurityPolicy(exam.securityPolicy);
   const tz = exam.timezone || DEFAULT_EXAM_TIMEZONE;
   const status = getExamStatus({
-    exam: { status: exam.status, startTime: exam.startTime, endTime: exam.endTime },
+    exam: {
+      status: exam.status,
+      startTime: exam.startTime,
+      endTime: exam.endTime,
+      settings: exam.settings as { maxAttempts?: number },
+    },
     sessions: exam.registration.sessions,
+    submittedAttemptCount: exam.registration.submittedAttemptCount,
   });
   const canBegin = agreed && !status.actionDisabled;
 

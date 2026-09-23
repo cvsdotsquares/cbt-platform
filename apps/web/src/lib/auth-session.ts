@@ -23,7 +23,7 @@ export async function syncAuthSession(
   return Boolean(data.isAdmin);
 }
 
-export async function hydrateAuthSession(): Promise<{
+export async function hydrateAuthSession(accessToken?: string | null): Promise<{
   user: AuthUser;
   accessToken: string;
   refreshToken?: string;
@@ -31,6 +31,7 @@ export async function hydrateAuthSession(): Promise<{
 } | null> {
   const res = await fetch('/api/auth/session', {
     method: 'GET',
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
     credentials: 'include',
   });
   if (!res.ok) return null;
@@ -43,8 +44,15 @@ export async function hydrateAuthSession(): Promise<{
   };
 }
 
-export async function clearAuthSession(): Promise<void> {
-  await fetch('/api/auth/session', { method: 'DELETE', credentials: 'include' });
+/** Clears HttpOnly auth cookies. Pass this tab's access token so other tabs' cookies are not wiped. */
+export async function clearAuthSession(accessToken?: string | null): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  await fetch('/api/auth/session', {
+    method: 'DELETE',
+    headers: Object.keys(headers).length ? headers : undefined,
+    credentials: 'include',
+  }).catch(() => {});
 }
 
 export function redirectAfterLogin(

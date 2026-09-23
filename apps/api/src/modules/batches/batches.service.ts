@@ -181,14 +181,51 @@ export class BatchesService {
     };
   }
 
+  async suggestNextRollNumber(batchId: string, tenantId: string): Promise<string> {
+    const batch = await this.prisma.batch.findFirst({ where: { id: batchId, tenantId } });
+    if (!batch) throw new NotFoundException('Batch not found');
+
+    const rolls = await this.prisma.batchEnrollment.findMany({
+      where: { batchId },
+      select: { rollNumber: true },
+    });
+    let maxNumeric = 0;
+    for (const row of rolls) {
+      const raw = row.rollNumber?.trim();
+      if (!raw) continue;
+      const digits = raw.replace(/\D/g, '');
+      if (digits) maxNumeric = Math.max(maxNumeric, parseInt(digits, 10));
+    }
+    return String(maxNumeric + 1).padStart(2, '0');
+  }
+
+  private async assertRollUniqueInBatch(batchId: string, roll: string | null, excludeEnrollmentId?: string) {
+    if (!roll) return;
+    const clash = await this.prisma.batchEnrollment.findFirst({
+      where: {
+        batchId,
+        rollNumber: { equals: roll, mode: 'insensitive' },
+        ...(excludeEnrollmentId ? { NOT: { id: excludeEnrollmentId } } : {}),
+      },
+    });
+    if (clash) {
+      throw new ConflictException(`Roll number "${roll}" is already assigned in this batch`);
+    }
+  }
+
   async enrollStudent(batchId: string, tenantId: string, candidateId: string, rollNumber?: string) {
     const batch = await this.prisma.batch.findFirst({ where: { id: batchId, tenantId } });
     if (!batch) throw new NotFoundException('Batch not found');
 
-    const roll = rollNumber?.trim() || null;
+    let roll = rollNumber?.trim() || null;
     const existing = await this.prisma.batchEnrollment.findFirst({
       where: { candidateId, batchId },
     });
+    if (!roll && !existing) {
+      roll = await this.suggestNextRollNumber(batchId, tenantId);
+    }
+    await this.assertRollUniqueInBatch(batchId, roll, existing?.id);
+
     if (existing) {
       return this.prisma.batchEnrollment.update({
         where: { id: existing.id },

@@ -1,13 +1,16 @@
 from typing import Any
 import asyncio
+import json
 import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, text
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -25,9 +28,16 @@ from app.schemas.auth import (
     LoginResponse,
     RefreshTokenRequest,
     RefreshTokenResponse,
+    InviteValidateRequest,
     UserCreate,
     UserResponse,
     AuthUserResponse,
+)
+from app.services.registration_invite import (
+    consume_invite,
+    find_active_invite,
+    normalize_invite_email,
+    validate_invite_token,
 )
 
 router = APIRouter(
@@ -82,6 +92,53 @@ async def _fetch_role_names(db: AsyncSession, user_id: str) -> list[str]:
     return [row.name for row in result.all()]
 
 
+async def _record_successful_login(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    ip_address: str,
+    user_agent: str,
+    device_fingerprint: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text(
+            """
+            UPDATE users
+            SET last_login_at = :now,
+                failed_attempts = 0,
+                locked_until = NULL,
+                updated_at = :now
+            WHERE id = :user_id
+            """
+        ),
+        {"now": now, "user_id": user_id},
+    )
+    # DB may match Prisma (created_at only) or Alembic (created_at + updated_at).
+    await db.execute(
+        text(
+            """
+            INSERT INTO login_history (
+                id, user_id, ip_address, user_agent, device_fingerprint,
+                success, created_at
+            )
+            VALUES (
+                :id, :user_id, :ip_address, :user_agent, :device_fingerprint,
+                TRUE, :now
+            )
+            """
+        ),
+        {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "ip_address": ip_address[:64],
+            "user_agent": user_agent[:512],
+            "device_fingerprint": device_fingerprint[:255],
+            "now": now,
+        },
+    )
+
+
 # ============================================================
 # LOGIN
 # ============================================================
@@ -92,7 +149,8 @@ async def _fetch_role_names(db: AsyncSession, user_id: str) -> list[str]:
     response_model_by_alias=True,
 )
 async def login(
-    request: LoginRequest,
+    body: LoginRequest,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
 
@@ -100,11 +158,11 @@ async def login(
     # Build user query
     # --------------------------------------------------------
 
-    email = request.email.strip().lower()
+    email = body.email.strip().lower()
     tenant_id: str | None = None
 
-    if request.tenant_id:
-        tenant_id = str(request.tenant_id).strip()
+    if body.tenant_id:
+        tenant_id = str(body.tenant_id).strip()
         try:
             uuid.UUID(tenant_id)
         except ValueError:
@@ -123,7 +181,7 @@ async def login(
 
     password_ok = await asyncio.to_thread(
         verify_password,
-        request.password,
+        body.password,
         user["password_hash"],
     )
     if not password_ok:
@@ -131,6 +189,15 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
+
+    client_host = http_request.client.host if http_request.client else "unknown"
+    await _record_successful_login(
+        db,
+        str(user["id"]),
+        ip_address=client_host,
+        user_agent=http_request.headers.get("user-agent", "unknown"),
+        device_fingerprint=body.device_fingerprint or "unknown",
+    )
 
     roles = await _fetch_role_names(db, str(user["id"]))
     role = roles[0] if roles else "user"
@@ -169,7 +236,7 @@ async def login(
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer",
-        expires_in=settings.JWT_EXPIRY_MINUTES * 60,
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=AuthUserResponse(
             id=user["id"],
             email=user["email"],
@@ -182,6 +249,18 @@ async def login(
             mfa_enabled=user["mfa_enabled"],
         ),
     )
+
+
+# ============================================================
+# INVITE VALIDATION
+# ============================================================
+
+@router.post("/invite/validate")
+async def validate_registration_invite(
+    body: InviteValidateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    return await validate_invite_token(db, body.invite_code)
 
 
 # ============================================================
@@ -198,15 +277,43 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ) -> Any:
 
+    email = normalize_invite_email(str(user_data.email))
+    invite_batch_id: str | None = None
+    invite_registration_number: str | None = None
+    invite_tenant_id: str | None = None
+    invite_code = (user_data.invite_code or "").strip()
+
+    if invite_code:
+        pending = await find_active_invite(db, invite_code)
+        if not pending:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invite not found or expired",
+            )
+        if email != pending["email"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email must match the invited address",
+            )
+        invite_tenant_id = str(pending["tenant_id"])
+        invite_batch_id = pending.get("batch_id")
+        invite_registration_number = pending.get("registration_number")
+
     # --------------------------------------------------------
     # 1. Check tenant
     # --------------------------------------------------------
 
-    tenant_result = await db.execute(
-        select(Tenant).where(
-            Tenant.id == user_data.tenant_id
+    if invite_tenant_id:
+        tenant_result = await db.execute(
+            select(Tenant).where(Tenant.id == invite_tenant_id, Tenant.is_active.is_(True))
         )
-    )
+    else:
+        tenant_filter = (
+            Tenant.id == str(user_data.tenant_id)
+            if user_data.tenant_id
+            else Tenant.slug == DEFAULT_TENANT_ID
+        )
+        tenant_result = await db.execute(select(Tenant).where(tenant_filter))
 
     tenant = tenant_result.scalar_one_or_none()
 
@@ -222,7 +329,8 @@ async def register(
 
     result = await db.execute(
         select(User).where(
-            User.email == user_data.email
+            User.email == email,
+            User.tenant_id == tenant.id,
         )
     )
 
@@ -234,16 +342,19 @@ async def register(
             detail="User with this email already exists",
         )
 
+    if invite_code:
+        await consume_invite(db, invite_code, email)
+
     # --------------------------------------------------------
     # 3. Find role inside this tenant
     # --------------------------------------------------------
 
-    role_name = user_data.role or "user"
+    role_name = (user_data.role or "CANDIDATE").strip().upper()
 
     role_result = await db.execute(
         select(Role).where(
             Role.name == role_name,
-            Role.tenant_id == user_data.tenant_id,
+            or_(Role.tenant_id == tenant.id, Role.tenant_id.is_(None)),
             Role.is_active.is_(True),
         )
     )
@@ -288,11 +399,11 @@ async def register(
     # --------------------------------------------------------
 
     new_user = User(
-        email=user_data.email,
+        email=email,
         first_name=first_name,
         last_name=last_name,
         password_hash=password_hash,
-        tenant_id=user_data.tenant_id,
+        tenant_id=tenant.id,
         is_active=True,
     )
 
@@ -311,6 +422,46 @@ async def register(
     )
 
     db.add(user_role)
+
+    candidate_id = str(uuid.uuid4())
+    reg_no = (invite_registration_number or "").strip() or f"STU-{uuid.uuid4().hex[:8].upper()}"
+    profile_source = "invite" if user_data.invite_code else "self"
+
+    await db.execute(
+        text(
+            """
+            INSERT INTO candidates
+              (id, tenant_id, user_id, registration_number, kyc_status, profile_data, created_at, updated_at)
+            VALUES
+              (:id, :tenant_id, :user_id, :registration_number, 'NOT_SUBMITTED',
+               CAST(:profile_data AS jsonb), :now, :now)
+            """
+        ),
+        {
+            "id": candidate_id,
+            "tenant_id": str(tenant.id),
+            "user_id": str(new_user.id),
+            "registration_number": reg_no,
+            "profile_data": json.dumps({"registrationSource": profile_source}),
+            "now": new_user.created_at,
+        },
+    )
+
+    if invite_batch_id:
+        await db.execute(
+            text(
+                """
+                INSERT INTO batch_enrollments (id, batch_id, candidate_id, enrolled_at)
+                VALUES (:id, :batch_id, :candidate_id, :now)
+                """
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "batch_id": invite_batch_id,
+                "candidate_id": candidate_id,
+                "now": new_user.created_at,
+            },
+        )
 
     # --------------------------------------------------------
     # 8. Commit
@@ -416,8 +567,9 @@ async def refresh_token(
 
     return RefreshTokenResponse(
         access_token=new_access_token,
+        refresh_token=request.refresh_token,
         token_type="bearer",
-        expires_in=settings.JWT_EXPIRY_MINUTES * 60,
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
 
 

@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
-import { batchesApi, examsApi } from '@/lib/api';
+import { batchesApi, examsApi, type ExamDetail } from '@/lib/api';
 import { toast } from '@/hooks/use-toast';
 import { GraduationCap, Loader2 } from 'lucide-react';
 
@@ -25,7 +25,24 @@ type BatchStudent = {
   firstName: string;
   lastName: string;
   registrationNumber: string;
+  notInBatch?: boolean;
 };
+
+function registrationToStudent(
+  reg: NonNullable<ExamDetail['registrations']>[number],
+): BatchStudent | null {
+  const candidateId = reg.candidateId ?? reg.candidate?.id;
+  if (!candidateId) return null;
+  const user = reg.candidate?.user;
+  if (!user) return null;
+  return {
+    candidateId,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    registrationNumber: reg.candidate?.registrationNumber ?? candidateId,
+    notInBatch: true,
+  };
+}
 
 export function ExamAssignCandidatesDialog({
   accessToken, examId, examTitle, open, onOpenChange,
@@ -68,17 +85,35 @@ export function ExamAssignCandidatesDialog({
     }));
   }, [batchDetail]);
 
+  /** Batch enrollments plus anyone still registered but no longer in the batch. */
+  const visibleStudents = useMemo<BatchStudent[]>(() => {
+    const byId = new Map<string, BatchStudent>();
+    for (const s of batchStudents) byId.set(s.candidateId, s);
+    for (const reg of exam?.registrations ?? []) {
+      const id = reg.candidateId ?? reg.candidate?.id;
+      if (!id || byId.has(id)) continue;
+      const extra = registrationToStudent(reg);
+      if (extra) byId.set(id, extra);
+    }
+    return [...byId.values()];
+  }, [batchStudents, exam?.registrations]);
+
+  const orphanRegisteredCount = useMemo(
+    () => visibleStudents.filter((s) => s.notInBatch).length,
+    [visibleStudents],
+  );
+
   useEffect(() => {
     if (!open) {
       setSelected(new Set());
       return;
     }
-    if (!batchStudents.length) return;
-    const onExam = new Set((exam?.registrations ?? []).map((r: { candidateId: string }) => r.candidateId));
+    if (!visibleStudents.length && !(exam?.registrations ?? []).length) return;
+    const onExam = new Set((exam?.registrations ?? []).map((r) => r.candidateId ?? r.candidate?.id).filter(Boolean) as string[]);
     setSelected(new Set(
-      batchStudents.filter((s) => onExam.has(s.candidateId)).map((s) => s.candidateId),
+      visibleStudents.filter((s) => onExam.has(s.candidateId)).map((s) => s.candidateId),
     ));
-  }, [open, batchStudents, exam?.registrations]);
+  }, [open, visibleStudents, exam?.registrations]);
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -89,7 +124,7 @@ export function ExamAssignCandidatesDialog({
     });
   };
 
-  const selectAll = () => setSelected(new Set(batchStudents.map((s) => s.candidateId)));
+  const selectAll = () => setSelected(new Set(visibleStudents.filter((s) => !s.notInBatch).map((s) => s.candidateId)));
   const selectNone = () => setSelected(new Set());
 
   const saveMutation = useMutation({
@@ -135,7 +170,7 @@ export function ExamAssignCandidatesDialog({
           </div>
         )}
 
-        {batchStudents.length > 0 && (
+        {visibleStudents.length > 0 && (
           <div className="flex gap-2 text-xs">
             <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={selectAll}>
               Select all
@@ -144,6 +179,14 @@ export function ExamAssignCandidatesDialog({
               Select none
             </Button>
           </div>
+        )}
+
+        {orphanRegisteredCount > 0 && (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            {orphanRegisteredCount} student{orphanRegisteredCount === 1 ? '' : 's'} assigned to this exam
+            but not in {linkedBatch?.name ?? 'the batch'}. Re-enroll them on Classes &amp; Batches, or
+            uncheck and save to remove them from this test.
+          </p>
         )}
 
         <div className="flex-1 overflow-y-auto space-y-2 py-2 min-h-0">
@@ -157,12 +200,12 @@ export function ExamAssignCandidatesDialog({
               This exam is not linked to a batch. Create tests from Create Test to auto-link a batch.
             </p>
           )}
-          {!loading && linkedBatch && !batchStudents.length && (
+          {!loading && linkedBatch && !visibleStudents.length && (
             <p className="text-sm text-muted-foreground py-4 text-center">
               No students in {linkedBatch.name}. Enroll students on Classes &amp; Batches first.
             </p>
           )}
-          {!loading && batchStudents.map((s) => (
+          {!loading && visibleStudents.map((s) => (
             <label
               key={s.candidateId}
               className="flex cursor-pointer items-center gap-3 rounded-lg border p-3 hover:bg-muted/50 has-[:checked]:border-primary/50 has-[:checked]:bg-primary/5"
@@ -177,6 +220,7 @@ export function ExamAssignCandidatesDialog({
                 <p className="text-xs text-muted-foreground">
                   {s.registrationNumber}
                   {s.rollNumber ? ` · Roll ${s.rollNumber}` : ''}
+                  {s.notInBatch ? ' · Not in batch' : ''}
                 </p>
               </div>
             </label>
@@ -184,9 +228,19 @@ export function ExamAssignCandidatesDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
-            onClick={() => saveMutation.mutate()}
+            onClick={() => {
+              const blocked = visibleStudents.filter((s) => s.notInBatch && selected.has(s.candidateId));
+              if (blocked.length) {
+                toast({
+                  title: 'Cannot save with students outside the batch',
+                  description: 'Uncheck students marked “Not in batch”, or re-enroll them in this batch first.',
+                  variant: 'destructive',
+                });
+                return;
+              }
+              saveMutation.mutate();
+            }}
             disabled={!linkedBatch || saveMutation.isPending}
           >
             {saveMutation.isPending ? 'Saving…' : `Save (${selected.size} student${selected.size === 1 ? '' : 's'})`}

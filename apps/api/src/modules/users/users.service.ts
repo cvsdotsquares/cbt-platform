@@ -8,16 +8,24 @@ const BCRYPT_ROUNDS = 12;
 
 /** Student accounts live under Candidates — never shown or assignable on Staff & Teachers. */
 const STUDENT_ROLES = [Role.CANDIDATE, Role.STUDENT] as const;
+const ASSIGNABLE_STAFF_ROLES = [Role.SUPER_ADMIN, Role.TEACHER] as const;
 
 @Injectable()
 export class UsersService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(tenantId: string, page?: unknown, limit?: unknown, search?: string) {
+  async findAll(
+    tenantId: string,
+    page?: unknown,
+    limit?: unknown,
+    search?: string,
+    includeInactive?: boolean,
+  ) {
     const p = parsePage(page);
     const l = parseLimit(limit);
     const where = {
       tenantId,
+      ...(includeInactive ? {} : { status: 'ACTIVE' as const }),
       // Staff & Teachers only — exclude pure students/candidates
       userRoles: {
         some: { role: { name: { notIn: [...STUDENT_ROLES] } } },
@@ -109,7 +117,7 @@ export class UsersService {
 
   async getRoles(callerRoles: string[] = []) {
     const roles = await this.prisma.role.findMany({
-      where: { isSystem: true, name: { notIn: [...STUDENT_ROLES] } },
+      where: { isSystem: true, name: { in: [...ASSIGNABLE_STAFF_ROLES] } },
       select: { id: true, name: true, description: true },
       orderBy: { name: 'asc' },
     });
@@ -122,6 +130,9 @@ export class UsersService {
   private assertStaffRoles(roles: { name: string }[]) {
     if (roles.some((r) => STUDENT_ROLES.includes(r.name as (typeof STUDENT_ROLES)[number]))) {
       throw new BadRequestException('Student/candidate roles are managed from the Students page');
+    }
+    if (roles.some((r) => !ASSIGNABLE_STAFF_ROLES.includes(r.name as (typeof ASSIGNABLE_STAFF_ROLES)[number]))) {
+      throw new BadRequestException('Only SUPER_ADMIN and TEACHER roles can be assigned');
     }
   }
 
@@ -291,11 +302,15 @@ export class UsersService {
       throw new BadRequestException('Cannot delete a super admin account');
     }
 
-    await this.prisma.session.deleteMany({ where: { userId: id } });
+    await this.prisma.auditLog.updateMany({
+      where: { userId: id },
+      data: { userId: null },
+    });
+    await this.prisma.passwordResetToken.deleteMany({ where: { userId: id } });
+    await this.prisma.teacherAssignment.deleteMany({ where: { userId: id } });
 
-    return this.prisma.user.update({
+    return this.prisma.user.delete({
       where: { id },
-      data: { status: 'INACTIVE' },
       select: {
         id: true,
         email: true,
@@ -304,5 +319,48 @@ export class UsersService {
         status: true,
       },
     });
+  }
+
+  private inactiveStaffWhere(tenantId: string, currentUserId: string) {
+    return {
+      tenantId,
+      status: { not: 'ACTIVE' as const },
+      id: { not: currentUserId },
+      candidate: { is: null },
+      userRoles: {
+        some: { role: { name: { notIn: [...STUDENT_ROLES] } } },
+        none: { role: { name: Role.SUPER_ADMIN } },
+      },
+    };
+  }
+
+  async countInactiveStaff(tenantId: string, currentUserId: string) {
+    const count = await this.prisma.user.count({
+      where: this.inactiveStaffWhere(tenantId, currentUserId),
+    });
+    return { count };
+  }
+
+  async purgeInactiveStaff(tenantId: string, currentUserId: string) {
+    const users = await this.prisma.user.findMany({
+      where: this.inactiveStaffWhere(tenantId, currentUserId),
+      select: { id: true },
+    });
+
+    const deletedIds: string[] = [];
+    for (const user of users) {
+      try {
+        await this.remove(user.id, tenantId, currentUserId);
+        deletedIds.push(user.id);
+      } catch {
+        // linked records — skip
+      }
+    }
+
+    return {
+      deleted: deletedIds.length,
+      ids: deletedIds,
+      skipped: users.length - deletedIds.length,
+    };
   }
 }

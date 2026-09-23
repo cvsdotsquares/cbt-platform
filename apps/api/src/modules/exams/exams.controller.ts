@@ -80,7 +80,14 @@ export class ExamsController {
   updateSchedule(
     @Param('id') id: string,
     @CurrentUser('tenantId') tenantId: string,
-    @Body() body: { startTime: string; endTime: string; timezone?: string; durationMinutes?: number },
+    @Body() body: {
+      startTime: string;
+      endTime: string;
+      timezone?: string;
+      durationMinutes?: number;
+      passingScore?: number;
+      maxAttempts?: number;
+    },
   ) {
     return this.examsService.updateSchedule(id, tenantId, body);
   }

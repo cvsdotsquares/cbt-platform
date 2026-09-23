@@ -47,6 +47,17 @@ export class RegisterDto {
   @IsOptional()
   @IsString()
   tenantId?: string;
+
+  @ApiPropertyOptional({ description: 'Required when public registration is disabled' })
+  @IsOptional()
+  @IsString()
+  inviteCode?: string;
+}
+
+export class ValidateInviteDto {
+  @ApiProperty()
+  @IsString()
+  inviteCode: string;
 }
 
 export class MfaVerifyDto {

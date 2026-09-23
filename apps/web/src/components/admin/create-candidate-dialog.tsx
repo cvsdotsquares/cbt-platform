@@ -83,7 +83,7 @@ export function CreateCandidateDialog({ accessToken, batches = [], classes = [] 
       setOpen(false);
       setForm({ ...EMPTY_FORM });
     },
-    onError: (e: Error) => toast({ title: 'Failed', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Unable to create student', description: e.message, variant: 'destructive' }),
   });
 
   return (
@@ -145,7 +145,6 @@ export function CreateCandidateDialog({ accessToken, batches = [], classes = [] 
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => handleOpenChange(false)}>Cancel</Button>
           <Button
             onClick={() => createMutation.mutate()}
             disabled={createMutation.isPending || !form.email || !form.password || !form.firstName}

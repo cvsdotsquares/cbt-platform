@@ -1,9 +1,16 @@
 import { useAuthStore } from '@/stores/auth-store';
 import { fetchWithColdStartRetry as fetchWithBackoff } from './cold-start-retry';
 import { isAdmin, isCandidate, normalizeRoles } from './roles';
+import type { AuthUser } from '@cbt/shared';
 
 const RENDER_API_BASE =
   process.env.API_PROXY_URL || 'https://cbt-api-ktkr.onrender.com';
+
+function resolvePublicApiBase(): string | null {
+  const raw = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (!raw) return null;
+  return raw.replace(/\/api\/v1\/?$/i, '').replace(/\/$/, '');
+}
 
 function isLocalDevHost(): boolean {
   if (typeof window === 'undefined') return false;
@@ -23,16 +30,70 @@ function getApiUrl(): string {
   return `${RENDER_API_BASE.replace(/\/$/, '')}/api/v1`;
 }
 
-/** Large file uploads bypass the Next.js proxy (10MB default limit). */
+/** Same-origin proxy avoids CORS/LAN mismatches and matches cookie auth for uploads. */
 function getMaterialsUploadUrl(): string {
-  const apiBase = (process.env.NEXT_PUBLIC_API_URL || RENDER_API_BASE).replace(/\/$/, '');
-  if (typeof window !== 'undefined' && isLocalDevHost()) {
-    return `${apiBase}/api/v1/materials/upload`;
-  }
   if (typeof window !== 'undefined') {
     return '/api/v1/materials/upload';
   }
+  const apiBase = resolvePublicApiBase() || RENDER_API_BASE.replace(/\/$/, '');
   return `${apiBase}/api/v1/materials/upload`;
+}
+
+function cloneFormData(source: FormData): FormData {
+  const copy = new FormData();
+  for (const [key, value] of source.entries()) {
+    copy.append(key, value);
+  }
+  return copy;
+}
+
+function getMaterialsBatchUploadUrl(): string {
+  return getMaterialsUploadUrl().replace(/\/upload\/?$/, '/upload-batch');
+}
+
+async function postMaterialsFormData(token: string, requestUrl: string, formData: FormData) {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'X-Tenant-ID': getAuthTenantId(),
+    'X-Device-Fingerprint': getFingerprint(),
+  };
+  const useColdStartRetry = typeof window !== 'undefined' && !isLocalDevHost();
+
+  let res: Response;
+  try {
+    res = useColdStartRetry
+      ? await fetchWithColdStartRetry(requestUrl, { method: 'POST', headers, body: formData, credentials: 'include' })
+      : await fetch(requestUrl, { method: 'POST', headers, body: formData, credentials: 'include' });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Upload failed';
+    if (msg === 'Failed to fetch') {
+      throw new Error(
+        'Could not reach the API. Start FastAPI with: python run_dev.py (from apps/api-fastapi).',
+      );
+    }
+    throw e instanceof Error ? e : new Error(msg);
+  }
+
+  if (res.status === 401) {
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      headers.Authorization = `Bearer ${newToken}`;
+      const retryBody = cloneFormData(formData);
+      res = useColdStartRetry
+        ? await fetchWithColdStartRetry(requestUrl, { method: 'POST', headers, body: retryBody, credentials: 'include' })
+        : await fetch(requestUrl, { method: 'POST', headers, body: retryBody, credentials: 'include' });
+    }
+  }
+
+  const raw = await res.text();
+  let data: unknown;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(formatNonJsonError(raw, res.ok));
+  }
+  if (!res.ok) throw new Error(formatApiError(data));
+  return (data as { data?: unknown }).data ?? data;
 }
 
 function isHtmlResponse(raw: string): boolean {
@@ -79,25 +140,34 @@ export interface ApiOptions extends RequestInit {
 
 let refreshPromise: Promise<string | null> | null = null;
 
-async function refreshAccessToken(): Promise<string | null> {
+async function performRefresh(): Promise<string | null> {
   try {
-    const res = await fetch('/api/auth/refresh', {
-      method: 'POST',
-      credentials: 'include',
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error('Refresh failed');
-    await useAuthStore.getState().updateTokens(data.accessToken, data.refreshToken);
+    const existing = useAuthStore.getState();
+    if (!existing.refreshToken) throw new Error('Refresh failed');
+    const data = await authApi.refresh(existing.refreshToken);
+    const accessToken = data.accessToken;
+    const refreshToken = data.refreshToken ?? existing.refreshToken;
+    if (!accessToken || !refreshToken) throw new Error('Refresh failed');
+    await existing.updateTokens(accessToken, refreshToken);
     if (data.user) {
       useAuthStore.setState({ user: data.user, isAuthenticated: true });
     }
-    return data.accessToken as string;
+    return accessToken;
   } catch {
     useAuthStore.getState().logout().finally(() => {
       if (typeof window !== 'undefined') window.location.href = '/login';
     });
     return null;
   }
+}
+
+export function refreshAccessToken(): Promise<string | null> {
+  if (!refreshPromise) {
+    refreshPromise = performRefresh().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
 }
 
 export type Paginated<T> = {
@@ -130,7 +200,14 @@ export type ExamListItem = {
 };
 
 export type ExamDetail = Omit<ExamListItem, 'sections'> & {
-  registrations?: { candidateId: string }[];
+  registrations?: {
+    candidateId: string;
+    candidate?: {
+      id: string;
+      registrationNumber: string;
+      user: { firstName: string; lastName: string };
+    };
+  }[];
   aiTestConfig?: {
     batchId?: string | null;
     batch?: {
@@ -146,6 +223,8 @@ export type ExamDetail = Omit<ExamListItem, 'sections'> & {
     _count?: { questions: number };
     questions?: {
       questionId: string;
+      marks?: number | null;
+      negativeMarks?: number | null;
       question: {
         title?: string;
         type: string;
@@ -177,6 +256,27 @@ export type CandidateListItem = {
       academicYear: string;
       academicClass: { id: string; name: string; level: number };
     };
+  }[];
+};
+
+export type CandidateKycDetail = {
+  id: string;
+  registrationNumber: string;
+  kycStatus: string;
+  profileData?: {
+    documentType?: string;
+    idNumber?: string;
+    submittedAt?: string;
+  } | null;
+  user: { email: string; firstName: string; lastName: string; phone?: string | null };
+  documents: {
+    id: string;
+    type: string;
+    fileName: string;
+    fileUrl: string;
+    fileSize: number;
+    mimeType: string;
+    uploadedAt?: string | null;
   }[];
 };
 
@@ -249,6 +349,7 @@ export type ResultReviewQuestion = {
 
 export type ResultReview = {
   resultId: string;
+  sessionId?: string;
   examTitle: string;
   examCode: string;
   candidateName: string;
@@ -281,8 +382,7 @@ export async function apiFetch<T>(endpoint: string, options: ApiOptions = {}): P
     : await fetch(requestUrl, { ...fetchOptions, headers, credentials: 'include' });
 
   if (response.status === 401 && !skipAuth && !endpoint.includes('/auth/refresh')) {
-    if (!refreshPromise) refreshPromise = refreshAccessToken().finally(() => { refreshPromise = null; });
-    const newToken = await refreshPromise;
+    const newToken = await refreshAccessToken();
     if (newToken) {
       headers['Authorization'] = `Bearer ${newToken}`;
       response = useColdStartRetry
@@ -311,10 +411,36 @@ function formatApiError(data: unknown): string {
     record.error && typeof record.error === 'object'
       ? (record.error as Record<string, unknown>).message
       : undefined;
-  const message = nested ?? record.message;
+  const detail = record.detail;
+  const message = nested ?? record.message ?? detail;
   if (Array.isArray(message)) return message.join(', ');
   if (typeof message === 'string' && message.length > 0) return message;
   return 'Request failed';
+}
+
+function isRetryableAiTransportError(message: string): boolean {
+  return /network\/dns|getaddrinfo|502|503|unavailable|could not reach the ai provider/i.test(message);
+}
+
+async function apiFetchWithAiRetry<T>(
+  endpoint: string,
+  options: ApiOptions = {},
+  maxAttempts = 7,
+): Promise<T> {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await apiFetch<T>(endpoint, options);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (!isRetryableAiTransportError(lastError.message) || attempt === maxAttempts - 1) {
+        throw lastError;
+      }
+      const delayMs = Math.min(15_000, 750 * 2 ** attempt);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError ?? new Error('Request failed');
 }
 
 function authHeaders(token: string) {
@@ -358,31 +484,57 @@ function normalizeLoginResponse(raw: Record<string, unknown>) {
 
 export const authApi = {
   login: async (body: { email: string; password: string }) => {
+    const tenantId = getTenantId();
+    const payload: Record<string, string> = {
+      ...body,
+      deviceFingerprint: getFingerprint(),
+    };
+    if (tenantId && tenantId !== 'default') {
+      payload.tenantId = tenantId;
+    }
     const raw = await apiFetch<Record<string, unknown>>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ ...body, deviceFingerprint: getFingerprint() }),
+      body: JSON.stringify(payload),
       skipAuth: true,
     });
     return normalizeLoginResponse(raw);
   },
-  register: (body: { email: string; password: string; firstName: string; lastName: string }) =>
+  register: (body: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+    inviteCode?: string;
+  }) =>
     apiFetch('/auth/register', {
       method: 'POST',
       body: JSON.stringify({ ...body, deviceFingerprint: getFingerprint() }),
       skipAuth: true,
     }),
+  validateInvite: (inviteCode: string, options?: Pick<ApiOptions, 'signal'>) =>
+    apiFetch<{ email: string; firstName?: string | null; lastName?: string | null; expiresAt: string }>(
+      '/auth/invite/validate',
+      {
+        method: 'POST',
+        body: JSON.stringify({ inviteCode }),
+        skipAuth: true,
+        ...options,
+      },
+    ),
   verifyMfa: (body: { mfaToken: string; totpCode: string }) =>
     apiFetch('/auth/mfa/verify', {
       method: 'POST',
       body: JSON.stringify(body),
       skipAuth: true,
     }),
-  refresh: (refreshToken: string) =>
-    apiFetch('/auth/refresh', {
+  refresh: async (refreshToken: string) => {
+    const raw = await apiFetch<Record<string, unknown>>('/auth/refresh', {
       method: 'POST',
       body: JSON.stringify({ refreshToken }),
       skipAuth: true,
-    }),
+    });
+    return normalizeLoginResponse(raw);
+  },
   logout: (token: string) =>
     apiFetch('/auth/logout', { method: 'POST', ...authHeaders(token) }),
   sessions: (token: string) => apiFetch('/auth/sessions', authHeaders(token)),
@@ -391,6 +543,19 @@ export const authApi = {
 
 export const dashboardApi = {
   stats: (token: string) => apiFetch('/analytics/dashboard', authHeaders(token)),
+  submissionsForDay: (token: string, from: string, to: string) =>
+    apiFetch(
+      `/analytics/dashboard/submissions?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      authHeaders(token),
+    ),
+  dismissViolation: (token: string, eventId: string) =>
+    apiFetch(`/analytics/violations/${eventId}/dismiss`, { method: 'POST', ...authHeaders(token) }),
+  dismissAllViolations: (token: string) =>
+    apiFetch('/analytics/violations/dismiss-all', { method: 'POST', ...authHeaders(token) }),
+  purgeRecycleBinViolations: (token: string) =>
+    apiFetch('/analytics/violations/purge-recycle-bin', { method: 'POST', ...authHeaders(token) }),
+  restoreViolation: (token: string, eventId: string) =>
+    apiFetch(`/analytics/violations/${eventId}/restore`, { method: 'POST', ...authHeaders(token) }),
 };
 
 export const examsApi = {
@@ -428,6 +593,8 @@ export const examsApi = {
   remove: (token: string, id: string) =>
     apiFetch(`/exams/${id}`, { method: 'DELETE', ...authHeaders(token) }),
   updateSchedule: (token: string, id: string, body: {
+    passingScore?: number;
+    maxAttempts?: number;
     startTime: string;
     endTime: string;
     timezone?: string;
@@ -486,9 +653,28 @@ export const candidatesApi = {
     rollNumber?: string;
   }) =>
     apiFetch('/candidates', { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
+  createRegistrationInvite: (
+    token: string,
+    body: {
+      email: string;
+      firstName?: string;
+      lastName?: string;
+      batchId?: string;
+      registrationNumber?: string;
+      expiresInDays?: number;
+    },
+  ) =>
+    apiFetch<{ signupUrl: string; inviteToken: string; email: string; expiresAt: string }>(
+      '/candidates/registration-invites',
+      { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) },
+    ),
   dashboard: (token: string) => apiFetch('/candidates/me/dashboard', authHeaders(token)),
   admitCard: (token: string, examId: string) =>
     apiFetch(`/candidates/me/admit-card/${examId}`, authHeaders(token)),
+  get: (token: string, id: string) =>
+    apiFetch<CandidateKycDetail>(`/candidates/${id}`, authHeaders(token)),
+  getKycReview: (token: string, id: string) =>
+    apiFetch<CandidateKycDetail>(`/candidates/${id}/kyc`, authHeaders(token)),
   verifyKyc: (token: string, id: string, status: 'VERIFIED' | 'REJECTED') =>
     apiFetch(`/candidates/${id}/kyc/verify`, {
       method: 'PATCH',
@@ -521,8 +707,11 @@ export const candidatesApi = {
 };
 
 export const usersApi = {
-  list: (token: string, page = 1, search = '', limit = 20) =>
-    apiFetch(`/users?page=${page}&limit=${limit}${search ? `&search=${encodeURIComponent(search)}` : ''}`, authHeaders(token)),
+  list: (token: string, page = 1, search = '', limit = 20, includeInactive = false) =>
+    apiFetch(
+      `/users?page=${page}&limit=${limit}${search ? `&search=${encodeURIComponent(search)}` : ''}${includeInactive ? '&includeInactive=true' : ''}`,
+      authHeaders(token),
+    ),
   create: (token: string, body: { email: string; password: string; firstName: string; lastName: string; roleIds?: string[] }) =>
     apiFetch('/users', { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
   get: (token: string, id: string) => apiFetch(`/users/${id}`, authHeaders(token)),
@@ -549,6 +738,13 @@ export const usersApi = {
   ) => apiFetch(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(body), ...authHeaders(token) }),
   remove: (token: string, id: string) =>
     apiFetch(`/users/${id}`, { method: 'DELETE', ...authHeaders(token) }),
+  inactiveCount: (token: string) =>
+    apiFetch<{ count: number }>('/users/meta/inactive-count', authHeaders(token)),
+  purgeInactive: (token: string) =>
+    apiFetch<{ deleted: number; ids: string[]; skipped?: number }>(
+      '/users/inactive',
+      { method: 'DELETE', ...authHeaders(token) },
+    ),
 };
 
 export const resultsApi = {
@@ -659,8 +855,21 @@ export const proctoringApi = {
       body: JSON.stringify(body),
       ...authHeaders(token),
     }),
+  eventDetail: (token: string, eventId: string) =>
+    apiFetch(`/proctoring/events/${eventId}`, authHeaders(token)),
   live: (token: string, examId: string) =>
     apiFetch(`/proctoring/sessions/${examId}/live`, authHeaders(token)),
+  liveFeeds: (token: string, examId: string) =>
+    apiFetch<{ examId: string; feeds: Record<string, { screen?: string; camera?: string; updatedAt: string }> }>(
+      `/proctoring/sessions/${examId}/live-feeds`,
+      authHeaders(token),
+    ),
+  uploadLiveFrame: (token: string, sessionId: string, body: { thumbnail: string; source: 'screen' | 'camera' }) =>
+    apiFetch(`/proctoring/sessions/${sessionId}/live-frame`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      ...authHeaders(token),
+    }),
   intervene: (token: string, sessionId: string, type: string, message?: string) =>
     apiFetch(`/proctoring/sessions/${sessionId}/intervene`, {
       method: 'POST',
@@ -677,6 +886,8 @@ export const auditApi = {
 export const analyticsApi = {
   exam: (token: string, examId: string) =>
     apiFetch<ExamAnalytics>(`/analytics/exam/${examId}`, authHeaders(token)),
+  violationDetail: (token: string, eventId: string) =>
+    apiFetch(`/analytics/violations/${encodeURIComponent(eventId)}`, authHeaders(token)),
 };
 
 export const aiApi = {
@@ -692,8 +903,22 @@ export const aiApi = {
     title: string; subjectId?: string; batchId?: string; allSubjects?: boolean;
     chapterIds?: string[]; questionCount?: number; questionsPerSubject?: number;
     difficulty?: string; questionTypes?: string[]; syllabusScope?: string;
-    durationMinutes?: number; assignToBatch?: boolean;
+    durationMinutes?: number; assignToBatch?: boolean; shuffleQuestions?: boolean;
   }) => apiFetch('/ai/tests/create', { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
+  generateReferenceAnswer: (token: string, body: {
+    questionText: string;
+    questionType: string;
+    subjectName?: string;
+    chapterTitle?: string;
+    chapterId?: string;
+    options?: Record<string, string>;
+    regenerate?: boolean;
+  }) => apiFetchWithAiRetry<{
+    referenceAnswer?: string;
+    rubric?: string;
+    options?: Record<string, string>;
+    correctAnswer?: { value: string | string[]; rubric?: string };
+  }>('/ai/reference-answer/generate', { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
   explain: (token: string, body: { questionText: string; correctAnswer: string }) =>
     apiFetch('/ai/explain', { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
   examInsights: (token: string, examId: string) =>
@@ -724,6 +949,8 @@ export const batchesApi = {
     apiFetch(`/batches/${id}`, { method: 'PATCH', body: JSON.stringify(body), ...authHeaders(token) }),
   remove: (token: string, id: string) =>
     apiFetch(`/batches/${id}`, { method: 'DELETE', ...authHeaders(token) }),
+  nextRollNumber: (token: string, batchId: string) =>
+    apiFetch<{ rollNumber: string }>(`/batches/${batchId}/next-roll-number`, authHeaders(token)),
   enroll: (token: string, batchId: string, body: { candidateId: string; rollNumber?: string }) =>
     apiFetch(`/batches/${batchId}/enroll`, { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
   listTeachers: (token: string, batchId: string) =>
@@ -754,51 +981,12 @@ export const materialsApi = {
     if (params?.subjectId) q.set('subjectId', params.subjectId);
     return apiFetch(`/materials?${q}`, authHeaders(token));
   },
-  upload: async (token: string, formData: FormData) => {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
-      'X-Tenant-ID': getAuthTenantId(),
-      'X-Device-Fingerprint': getFingerprint(),
-    };
-    const requestUrl = getMaterialsUploadUrl();
-    const useColdStartRetry = typeof window !== 'undefined' && !isLocalDevHost();
-
-    let res: Response;
-    try {
-      res = useColdStartRetry
-        ? await fetchWithColdStartRetry(requestUrl, { method: 'POST', headers, body: formData, credentials: 'include' })
-        : await fetch(requestUrl, { method: 'POST', headers, body: formData, credentials: 'include' });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Upload failed';
-      if (msg === 'Failed to fetch') {
-        throw new Error(
-          'Could not reach the API. Ensure FastAPI is running on port 8000 (uvicorn app.main:app --reload).',
-        );
-      }
-      throw e instanceof Error ? e : new Error(msg);
-    }
-
-    if (res.status === 401) {
-      if (!refreshPromise) refreshPromise = refreshAccessToken().finally(() => { refreshPromise = null; });
-      const newToken = await refreshPromise;
-      if (newToken) {
-        headers.Authorization = `Bearer ${newToken}`;
-        res = useColdStartRetry
-          ? await fetchWithColdStartRetry(requestUrl, { method: 'POST', headers, body: formData, credentials: 'include' })
-          : await fetch(requestUrl, { method: 'POST', headers, body: formData, credentials: 'include' });
-      }
-    }
-
-    const raw = await res.text();
-    let data: unknown;
-    try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch {
-      throw new Error(formatNonJsonError(raw, res.ok));
-    }
-    if (!res.ok) throw new Error(formatApiError(data));
-    return (data as { data?: unknown }).data ?? data;
-  },
+  upload: (token: string, formData: FormData) =>
+    postMaterialsFormData(token, getMaterialsUploadUrl(), formData),
+  uploadBatch: (token: string, formData: FormData) =>
+    postMaterialsFormData(token, getMaterialsBatchUploadUrl(), formData),
+  reconcileSubjects: (token: string) =>
+    apiFetch('/materials/reconcile-subjects', { method: 'POST', ...authHeaders(token) }),
   reindex: (token: string, id: string) =>
     apiFetch(`/materials/${id}/reindex`, { method: 'POST', ...authHeaders(token) }),
   delete: (token: string, id: string) =>
@@ -860,6 +1048,22 @@ export const materialsApi = {
 
 export const learningApi = {
   studentDashboard: (token: string) => apiFetch('/learning/student/dashboard', authHeaders(token)),
+  instituteLessons: (token: string) =>
+    apiFetch<{
+      items: {
+        id: string;
+        chapterId: string;
+        batchId: string;
+        title: string;
+        description: string;
+        subjectName: string;
+        batchName: string;
+        className: string;
+        chapterNumber: number;
+        status: 'planned' | 'in-progress' | 'completed';
+      }[];
+      batchCount: number;
+    }>('/learning/institute/lessons', authHeaders(token)),
   recommendations: (token: string) => apiFetch('/learning/student/recommendations', authHeaders(token)),
   teacherAnalytics: (token: string, batchId: string, subjectId?: string) =>
     apiFetch(`/learning/teacher/batch/${batchId}/analytics${subjectId ? `?subjectId=${subjectId}` : ''}`, authHeaders(token)),

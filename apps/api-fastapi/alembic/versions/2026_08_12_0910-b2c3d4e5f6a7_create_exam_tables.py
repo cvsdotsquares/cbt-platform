@@ -32,7 +32,7 @@ def upgrade() -> None:
         sa.Column("description", sa.String(length=1000), nullable=True),
         sa.Column("start_time", sa.DateTime(timezone=True), nullable=False),
         sa.Column("end_time", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("timezone", sa.String(length=64), nullable=False, server_default="UTC"),
+        sa.Column("timezone", sa.String(length=64), nullable=False, server_default="Asia/Kolkata"),
         sa.Column("settings", sa.JSON(), nullable=True),
         sa.Column("security_policy", sa.JSON(), nullable=True),
         sa.Column("created_by_id", sa.UUID(), nullable=True),

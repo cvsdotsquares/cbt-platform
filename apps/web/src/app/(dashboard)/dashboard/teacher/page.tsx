@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -89,9 +89,9 @@ const quickActions: {
 
 function getGreeting() {
   const hour = new Date().getHours();
-  if (hour < 12) return 'morning';
-  if (hour < 17) return 'afternoon';
-  return 'evening';
+  if (hour < 12) return 'Morning';
+  if (hour < 17) return 'Afternoon';
+  return 'Evening';
 }
 
 function timeAgo(iso?: string) {
@@ -164,6 +164,47 @@ export default function TeacherPage() {
     [examsPage],
   );
 
+  const assignedBatches = useMemo(
+    () =>
+      [...(batches ?? [])].sort(
+        (a, b) =>
+          a.academicClass.level - b.academicClass.level ||
+          a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+      ),
+    [batches],
+  );
+
+  type SyllabusProgressSubject = { subject: { id: string; name: string } };
+
+  const syllabusProgressQueries = useQueries({
+    queries: assignedBatches.map((batch) => ({
+      queryKey: ['syllabus-progress', batch.id, 'teacher-home'],
+      queryFn: () =>
+        batchesApi.getSyllabusProgress(accessToken!, batch.id) as Promise<SyllabusProgressSubject[]>,
+      enabled: !!accessToken,
+      staleTime: 60_000,
+    })),
+  });
+
+  const syllabusSubjectsByBatchId = useMemo(() => {
+    const map = new Map<string, string[]>();
+    assignedBatches.forEach((batch, index) => {
+      const rows = syllabusProgressQueries[index]?.data;
+      if (!rows?.length) return;
+      const names = rows.map((row) => row.subject?.name).filter(Boolean) as string[];
+      if (names.length) map.set(batch.id, names);
+    });
+    return map;
+  }, [assignedBatches, syllabusProgressQueries]);
+
+  function subjectsForBatch(batch: TeacherBatch): string[] {
+    const fromAssignments = (batch.teacherAssignments ?? [])
+      .map((a) => a.subject?.name)
+      .filter(Boolean) as string[];
+    if (fromAssignments.length) return [...new Set(fromAssignments)];
+    return syllabusSubjectsByBatchId.get(batch.id) ?? [];
+  }
+
   const overview = useMemo(() => {
     const now = Date.now();
     const students = (batches ?? []).reduce((sum, b) => sum + (b._count?.enrollments ?? 0), 0);
@@ -171,9 +212,7 @@ export default function TeacherPage() {
     const drafts = classTests.filter((e) => e.status === 'DRAFT').length;
     const subjects = new Set<string>();
     for (const b of batches ?? []) {
-      for (const a of b.teacherAssignments ?? []) {
-        if (a.subject?.name) subjects.add(a.subject.name);
-      }
+      for (const name of subjectsForBatch(b)) subjects.add(name);
     }
     const upcoming = classTests
       .filter((e) => {
@@ -192,7 +231,7 @@ export default function TeacherPage() {
       submissions,
       upcoming,
     };
-  }, [batches, classTests]);
+  }, [batches, classTests, syllabusSubjectsByBatchId]);
 
   const isLoading = batchesLoading || examsLoading;
 
@@ -220,10 +259,16 @@ export default function TeacherPage() {
                 Teacher portal
               </Badge>
               {overview.classes > 0 ? (
-                <Badge variant="success" className="normal-case tracking-normal">
-                  <CheckCircle2 className="h-3 w-3" />
-                  {overview.classes} class{overview.classes === 1 ? '' : 'es'} assigned
-                </Badge>
+                <Link href="#assigned-classes" className="inline-flex">
+                  <Badge
+                    variant="success"
+                    className="normal-case tracking-normal hover:bg-emerald-500/15"
+                    title="Jump to your assigned class list"
+                  >
+                    <CheckCircle2 className="h-3 w-3" />
+                    {overview.classes} batch{overview.classes === 1 ? '' : 'es'} assigned
+                  </Badge>
+                </Link>
               ) : (
                 <Badge variant="warning" className="normal-case tracking-normal">
                   Waiting for class assignment
@@ -265,7 +310,7 @@ export default function TeacherPage() {
         <StatCard title="Students" value={overview.students} icon={Users} accent="green" />
         <StatCard title="Published Tests" value={overview.published} icon={ClipboardList} accent="violet" />
         <StatCard
-          title="Classes"
+          title="Assigned batches"
           value={overview.classes}
           icon={School}
           accent="blue"
@@ -279,6 +324,58 @@ export default function TeacherPage() {
           trend={overview.drafts ? `${overview.drafts} draft(s)` : undefined}
         />
       </div>
+
+      {assignedBatches.length > 0 && (
+        <section id="assigned-classes" className="scroll-mt-24">
+          <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-base font-semibold">Your assigned classes</h2>
+              <p className="text-sm text-muted-foreground">
+                Batches and subjects linked to your teacher account ({assignedBatches.length} total).
+              </p>
+            </div>
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/dashboard/batches">
+                Topic progress <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+              </Link>
+            </Button>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {assignedBatches.map((batch) => {
+              const subjects = subjectsForBatch(batch);
+              return (
+                <Card key={batch.id} className="surface-card">
+                  <CardContent className="space-y-3 p-5">
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 text-blue-600">
+                        <GraduationCap className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold leading-snug">{batch.academicClass.name}</p>
+                        <p className="text-sm text-muted-foreground">{batch.name} · {batch.academicYear}</p>
+                      </div>
+                    </div>
+                    {subjects.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {subjects.map((name) => (
+                          <Badge key={name} variant="secondary" className="normal-case tracking-normal">
+                            {name}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No subjects with syllabus content yet.</p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      {batch._count?.enrollments ?? 0} student{(batch._count?.enrollments ?? 0) === 1 ? '' : 's'} enrolled
+                    </p>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <section>
         <div className="mb-4 flex items-center justify-between">

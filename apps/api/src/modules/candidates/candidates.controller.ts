@@ -8,6 +8,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permission, type JwtPayload } from '@cbt/shared';
 import { getTeacherBatchIds, isTeacherScoped } from '../../common/utils/teacher-scope.util';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RegistrationInviteService } from '../auth/registration-invite.service';
 
 @ApiTags('Candidates')
 @Controller('candidates')
@@ -17,6 +18,7 @@ export class CandidatesController {
   constructor(
     private candidatesService: CandidatesService,
     private prisma: PrismaService,
+    private registrationInvites: RegistrationInviteService,
   ) {}
 
   @Get()
@@ -75,6 +77,34 @@ export class CandidatesController {
     return this.candidatesService.getKycStats(tenantId);
   }
 
+  @Get('registration-invites')
+  @RequirePermissions(Permission.CANDIDATE_INVITE)
+  @ApiOperation({ summary: 'List pending student signup invites' })
+  listRegistrationInvites(
+    @CurrentUser('tenantId') tenantId: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.registrationInvites.listInvites(tenantId, page, limit);
+  }
+
+  @Post('registration-invites')
+  @RequirePermissions(Permission.CANDIDATE_INVITE)
+  @ApiOperation({ summary: 'Create invite-only student signup link' })
+  createRegistrationInvite(
+    @CurrentUser() user: JwtPayload,
+    @Body() body: {
+      email: string;
+      firstName?: string;
+      lastName?: string;
+      batchId?: string;
+      registrationNumber?: string;
+      expiresInDays?: number;
+    },
+  ) {
+    return this.registrationInvites.createInvite(user.tenantId, user.sub, body);
+  }
+
   @Post('me/kyc')
   @RequirePermissions(Permission.CANDIDATE_UPDATE)
   @ApiOperation({ summary: 'Submit KYC documents' })
@@ -96,6 +126,13 @@ export class CandidatesController {
   @ApiOperation({ summary: 'Get admit card for an exam' })
   getAdmitCard(@CurrentUser('sub') userId: string, @Param('examId') examId: string) {
     return this.candidatesService.getAdmitCard(userId, examId);
+  }
+
+  @Get(':id/kyc')
+  @RequirePermissions(Permission.CANDIDATE_READ)
+  @ApiOperation({ summary: 'KYC documents and profile for review' })
+  getKycReview(@Param('id') id: string, @CurrentUser('tenantId') tenantId: string) {
+    return this.candidatesService.findOne(id, tenantId);
   }
 
   @Get(':id')

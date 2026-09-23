@@ -30,8 +30,8 @@ export default function AuditPage() {
         badge="Compliance"
       />
       <Card>
-        <CardContent className="p-0">
-          <table className="w-full text-sm">
+        <CardContent className="overflow-x-auto p-0">
+          <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b bg-muted/50">
                 <th className="p-3 text-left">Time</th>

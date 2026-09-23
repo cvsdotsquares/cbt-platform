@@ -40,9 +40,10 @@ type ExamRegistration = {
   exam: {
     title: string; code: string; status: string;
     startTime: string; endTime: string; timezone?: string;
-    settings?: { durationMinutes: number };
+    settings?: { durationMinutes: number; maxAttempts?: number; passingScore?: number };
   };
   sessions?: { status: string }[];
+  submittedAttemptCount?: number;
 };
 
 type CandidateDashboard = {
@@ -63,12 +64,26 @@ type CandidateDashboard = {
 
 type Tab = 'exams' | 'results' | 'progress';
 
+function formatPercentage(value: number): string {
+  return `${Number(value.toFixed(2))}%`;
+}
+
+function getExamDurationMinutes(exam: ExamRegistration['exam']): number | null {
+  const configured = exam.settings?.durationMinutes;
+  if (typeof configured === 'number' && configured > 0) return configured;
+  if (!exam.startTime || !exam.endTime) return null;
+  const windowMinutes = Math.round((new Date(exam.endTime).getTime() - new Date(exam.startTime).getTime()) / 60_000);
+  return windowMinutes > 0 ? windowMinutes : null;
+}
+
 const KYC_VARIANTS: Record<string, 'success' | 'warning' | 'destructive' | 'outline'> = {
   VERIFIED: 'success',
   PENDING: 'warning',
   REJECTED: 'destructive',
   NOT_SUBMITTED: 'outline',
 };
+
+const CANDIDATE_VISIBLE_EXAM_STATUSES = new Set(['PUBLISHED', 'COMPLETED']);
 
 const READINESS_ITEMS = [
   { icon: Wifi, label: 'Stable internet connection' },
@@ -79,7 +94,7 @@ const READINESS_ITEMS = [
 
 export default function MyExamsPage() {
   const router = useRouter();
-  const { accessToken, ready } = useRequireCandidate();
+  const { accessToken, ready, isCandidateUser } = useRequireCandidate();
   const { user, logout } = useAuthStore();
   const [admitCard, setAdmitCard] = useState<AdmitCard | null>(null);
   const [loadingAdmit, setLoadingAdmit] = useState<string | null>(null);
@@ -97,20 +112,25 @@ export default function MyExamsPage() {
   const { data: exams, isLoading: examsLoading } = useQuery({
     queryKey: ['my-exams'],
     queryFn: () => examsApi.myExams(accessToken!),
-    enabled: !!accessToken,
-    refetchInterval: 60_000,
+    enabled: ready && isCandidateUser && !!accessToken,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
   });
 
   const { data: results } = useQuery({
     queryKey: ['my-results'],
     queryFn: () => resultsApi.my(accessToken!),
-    enabled: !!accessToken,
+    enabled: ready && isCandidateUser && !!accessToken,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
   });
 
   const { data: dashboard } = useQuery({
     queryKey: ['candidate-dashboard'],
     queryFn: () => candidatesApi.dashboard(accessToken!) as Promise<CandidateDashboard>,
-    enabled: !!accessToken,
+    enabled: ready && isCandidateUser && !!accessToken,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
   });
 
   const { data: learning, isLoading: learningLoading, isError: learningError } = useQuery({
@@ -148,10 +168,12 @@ export default function MyExamsPage() {
         stats: { total: number; done: number; studying: number; subjectCount?: number };
       }[];
     }>,
-    enabled: !!accessToken,
+    enabled: ready && isCandidateUser && !!accessToken,
   });
 
-  const examList = ((exams as ExamRegistration[]) || []).filter((reg) => reg.exam);
+  const examList = ((exams as ExamRegistration[]) || []).filter(
+    (reg) => reg.exam && CANDIDATE_VISIBLE_EXAM_STATUSES.has(reg.exam.status),
+  );
   const resultList = (results as { items?: {
     id: string; totalScore: number; maxScore: number; percentage: number;
     rank?: number | null; percentile?: number | null; totalCandidates?: number | null;
@@ -238,7 +260,7 @@ export default function MyExamsPage() {
   if (!ready) return null;
   if (user && isAdmin(normalizeRoles(user.roles))) return null;
 
-  const greeting = new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening';
+  const greeting = new Date().getHours() < 12 ? 'Morning' : new Date().getHours() < 17 ? 'Afternoon' : 'Evening';
 
   return (
     <div className="min-h-screen mesh-bg">
@@ -268,7 +290,7 @@ export default function MyExamsPage() {
               await logout();
               window.location.href = '/login';
             }}>
-              <LogOut className="h-4 w-4 sm:mr-2" /> <span className="hidden sm:inline">Logout</span>
+              <LogOut className="h-4 w-4 sm:mr-2" /> <span className="hidden sm:inline">Sign out</span>
             </Button>
           </div>
         </div>
@@ -309,7 +331,7 @@ export default function MyExamsPage() {
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-          <StatCard title="Class Tests" value={stats?.totalExams ?? examList.length} icon={FileText} accent="blue" />
+          <StatCard title="Class Tests" value={examList.length} icon={FileText} accent="blue" />
           <StatCard
             title="In Progress"
             value={stats?.inProgressExams ?? 0}
@@ -321,7 +343,7 @@ export default function MyExamsPage() {
           <StatCard title="Submitted" value={stats?.submittedExams ?? 0} icon={CheckCircle2} accent="green" />
           <StatCard
             title="Avg. Score"
-            value={stats?.averageScore != null ? `${stats.averageScore.toFixed(1)}%` : '—'}
+            value={stats?.averageScore != null ? formatPercentage(stats.averageScore) : '—'}
             icon={Award}
             accent="violet"
             trend={stats?.publishedResults ? `${stats.publishedResults} results` : undefined}
@@ -405,7 +427,9 @@ export default function MyExamsPage() {
                                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                                   <span className="flex items-center gap-1.5">
                                     <Clock className="h-3 w-3" />
-                                    {reg.exam.settings?.durationMinutes ?? 30} min
+                                    {getExamDurationMinutes(reg.exam) != null
+                                      ? `${getExamDurationMinutes(reg.exam)} min`
+                                      : 'Duration unavailable'}
                                   </span>
                                   <span>
                                     {formatExamTimeRange(reg.exam.startTime, reg.exam.endTime, tz)}
@@ -481,14 +505,16 @@ export default function MyExamsPage() {
                               <p className="text-2xl font-bold tabular-nums text-primary">
                                 {r.totalScore}<span className="text-base font-normal text-muted-foreground">/{r.maxScore}</span>
                               </p>
-                              <p className="text-sm font-semibold text-muted-foreground">{r.percentage.toFixed(1)}%</p>
+                              <p className="text-sm font-semibold text-muted-foreground">{formatPercentage(r.percentage)}</p>
                             </div>
                             <Button variant="outline" size="sm" onClick={() => setReviewResultId(r.id)}>
                               <Eye className="mr-2 h-3.5 w-3.5" /> Answers
                             </Button>
-                            <Button variant="outline" size="sm" onClick={() => openCertificate(r.id)} disabled={loadingCertificate}>
-                              <Download className="mr-2 h-3.5 w-3.5" /> Certificate
-                            </Button>
+                            {passed && (
+                              <Button variant="outline" size="sm" onClick={() => openCertificate(r.id)} disabled={loadingCertificate}>
+                                <Download className="mr-2 h-3.5 w-3.5" /> Certificate
+                              </Button>
+                            )}
                           </div>
                         </div>
                         <div className="mt-4 space-y-1.5">

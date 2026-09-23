@@ -250,27 +250,55 @@ export class CurriculumService {
     return removed;
   }
 
+  /** Subject IDs with at least one indexed upload (for syllabus tabs / book lists). */
+  async getSubjectIdsWithMaterials(
+    tenantId: string,
+    allowedSubjectIds?: string[],
+  ): Promise<Set<string>> {
+    if (allowedSubjectIds && allowedSubjectIds.length === 0) {
+      return new Set();
+    }
+    const rows = await this.prisma.studyMaterial.findMany({
+      where: {
+        tenantId,
+        status: 'READY',
+        subjectId: { not: null },
+        ...(allowedSubjectIds ? { subjectId: { in: allowedSubjectIds } } : {}),
+      },
+      select: { subjectId: true },
+      distinct: ['subjectId'],
+    });
+    return new Set(rows.map((r) => r.subjectId!).filter(Boolean));
+  }
+
   /** Return only classes/subjects/chapters that have indexed uploads for this tenant. */
   async getClassesFromUploads(tenantId: string, allowedSubjectIds?: string[]) {
     const chapterIds = await this.getUploadedChapterIdsForTenant(tenantId, allowedSubjectIds);
-    if (!chapterIds.size) return [];
+    const materialSubjectIds = await this.getSubjectIdsWithMaterials(tenantId, allowedSubjectIds);
+    if (!chapterIds.size && !materialSubjectIds.size) return [];
 
     const classes = await this.getClasses(tenantId, allowedSubjectIds);
     return classes
       .map((cls) => ({
         ...cls,
         subjects: cls.subjects
-          .map((subject) => ({
-            ...subject,
-            books: subject.books
+          .map((subject) => {
+            const books = subject.books
               .map((book) => ({
                 ...book,
-                chapters: book.chapters
-                  .filter((ch) => chapterIds.has(ch.id)),
+                chapters: book.chapters.filter((ch) => chapterIds.has(ch.id)),
               }))
-              .filter((book) => book.chapters.length > 0),
-          }))
-          .filter((subject) => subject.books.some((b) => b.chapters.length > 0)),
+              .filter((book) => book.chapters.length > 0);
+            if (materialSubjectIds.has(subject.id)) {
+              return { ...subject, books };
+            }
+            return { ...subject, books };
+          })
+          .filter(
+            (subject) =>
+              materialSubjectIds.has(subject.id)
+              || subject.books.some((b) => b.chapters.length > 0),
+          ),
       }))
       .filter((cls) => cls.subjects.length > 0);
   }

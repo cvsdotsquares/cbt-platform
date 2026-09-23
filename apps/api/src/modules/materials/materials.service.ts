@@ -5,6 +5,7 @@ import { RagService } from '../rag/rag.service';
 import { StorageService } from '../../common/storage/storage.service';
 import { MaterialType } from '@prisma/client';
 import type { ReadStream } from 'fs';
+import { guessSubjectIdForClass } from './subject-guess.util';
 
 @Injectable()
 export class MaterialsService {
@@ -104,6 +105,13 @@ export class MaterialsService {
     };
   }
 
+  private async subjectsForClass(academicClassId: string) {
+    return this.prisma.subject.findMany({
+      where: { academicClassId },
+      select: { id: true, name: true, code: true },
+    });
+  }
+
   private async resolveSubjectMeta(academicClassId: string, subjectId: string) {
     const subject = await this.prisma.subject.findUnique({
       where: { id: subjectId },
@@ -167,20 +175,29 @@ export class MaterialsService {
       throw new BadRequestException('Class and Subject are required.');
     }
 
+    const classSubjects = await this.subjectsForClass(meta.academicClassId);
+    const effectiveSubjectId =
+      guessSubjectIdForClass(
+        file.originalname,
+        meta.title,
+        classSubjects,
+        meta.subjectId,
+      ) ?? meta.subjectId;
+
     const isFullBook = meta.fullBook === true;
 
     const resolved = isFullBook
-      ? { ...(await this.resolveSubjectMeta(meta.academicClassId, meta.subjectId)), chapterId: null, topicId: null }
+      ? { ...(await this.resolveSubjectMeta(meta.academicClassId, effectiveSubjectId)), chapterId: null, topicId: null }
       : meta.chapterId
         ? await this.resolveChapterMeta({
           academicClassId: meta.academicClassId,
-          subjectId: meta.subjectId,
+          subjectId: effectiveSubjectId,
           chapterId: meta.chapterId,
           topicId: meta.topicId,
           bookId: meta.bookId,
         })
         : {
-          ...(await this.resolveSubjectMeta(meta.academicClassId, meta.subjectId)),
+          ...(await this.resolveSubjectMeta(meta.academicClassId, effectiveSubjectId)),
           chapterId: null,
           topicId: meta.topicId || null,
         };
@@ -243,5 +260,67 @@ export class MaterialsService {
     await this.prisma.studyMaterial.delete({ where: { id } });
     await this.storage.delete(material.fileUrl);
     return { deleted: true };
+  }
+
+  async uploadBatch(
+    tenantId: string,
+    userId: string,
+    files: Express.Multer.File[],
+    meta: {
+      type: MaterialType;
+      academicClassId: string;
+      subjectId: string;
+      academicSession?: string;
+      fullBook?: boolean;
+      titles?: string[];
+    },
+  ) {
+    if (!files.length) throw new BadRequestException('No files uploaded.');
+    const created = [];
+    for (const [index, file] of files.entries()) {
+      const title =
+        meta.titles?.[index]?.trim()
+        || file.originalname.replace(/\.[^.]+$/, '')
+        || file.originalname;
+      const row = await this.upload(tenantId, userId, file, {
+        title,
+        type: meta.type,
+        academicClassId: meta.academicClassId,
+        subjectId: meta.subjectId,
+        academicSession: meta.academicSession,
+        fullBook: meta.fullBook,
+      });
+      created.push(row);
+    }
+    return { count: created.length, materials: created };
+  }
+
+  async reconcileSubjects(tenantId: string) {
+    const materials = await this.prisma.studyMaterial.findMany({
+      where: { tenantId },
+    });
+    let updated = 0;
+    for (const material of materials) {
+      if (!material.academicClassId || !material.subjectId) continue;
+      const subjects = await this.subjectsForClass(material.academicClassId);
+      const guessed = guessSubjectIdForClass(
+        material.fileName,
+        material.title,
+        subjects,
+        material.subjectId,
+      );
+      if (!guessed || guessed === material.subjectId) continue;
+      const resolved = await this.resolveSubjectMeta(material.academicClassId, guessed);
+      await this.prisma.studyMaterial.update({
+        where: { id: material.id },
+        data: {
+          subjectId: resolved.subjectId,
+          bookId: resolved.bookId,
+        },
+      });
+      updated += 1;
+      void this.indexInBackground(material.id);
+    }
+    return { updated };
   }
 }

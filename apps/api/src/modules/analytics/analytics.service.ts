@@ -15,6 +15,10 @@ export class AnalyticsService {
       totalViolations,
       recentSubmissions,
       recentViolations,
+      previousExams,
+      pendingKyc,
+      recentStudents,
+      recentTests,
     ] = await Promise.all([
       this.prisma.exam.count({ where: { tenantId } }),
       this.prisma.exam.count({ where: { tenantId, status: 'PUBLISHED' } }),
@@ -27,7 +31,7 @@ export class AnalyticsService {
       this.prisma.examResult.findMany({
         where: { exam: { tenantId } },
         orderBy: { createdAt: 'desc' },
-        take: 5,
+        take: 20,
         include: {
           exam: { select: { title: true, code: true } },
           candidate: { include: { user: { select: { firstName: true, lastName: true } } } },
@@ -45,6 +49,41 @@ export class AnalyticsService {
             },
           },
         },
+      }),
+      this.prisma.exam.findMany({
+        where: { tenantId, status: { in: ['PUBLISHED', 'SCHEDULED'] }, endTime: { lt: new Date() } },
+        orderBy: { startTime: 'desc' },
+        take: 5,
+        include: { _count: { select: { registrations: true } } },
+      }),
+      this.prisma.candidate.findMany({
+        where: { tenantId, kycStatus: 'PENDING' },
+        orderBy: { updatedAt: 'desc' },
+        take: 5,
+        include: { user: { select: { firstName: true, lastName: true, email: true } } },
+      }),
+      this.prisma.candidate.findMany({
+        where: { tenantId },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: {
+          user: { select: { firstName: true, lastName: true, email: true } },
+          batchEnrollments: {
+            orderBy: { enrolledAt: 'asc' },
+            take: 1,
+            include: {
+              batch: {
+                include: { academicClass: { select: { id: true, level: true, name: true } } },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.exam.findMany({
+        where: { tenantId },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { id: true, title: true, code: true, status: true, createdAt: true },
       }),
     ]);
 
@@ -65,6 +104,7 @@ export class AnalyticsService {
         violationAlerts: totalViolations,
       },
       upcomingExams,
+      previousExams,
       recentSubmissions: recentSubmissions.map((r) => ({
         id: r.id,
         candidateName: `${r.candidate.user.firstName} ${r.candidate.user.lastName}`,
@@ -78,6 +118,8 @@ export class AnalyticsService {
       })),
       recentViolations: recentViolations.map((v) => ({
         id: v.id,
+        sessionId: v.sessionId,
+        examId: v.session.examId,
         eventType: v.eventType,
         label: this.formatViolationLabel(v.eventType),
         severity: v.severity,
@@ -86,7 +128,63 @@ export class AnalyticsService {
         occurredAt: v.occurredAt,
         message: `${this.formatViolationLabel(v.eventType)} during ${v.session.exam.title}`,
       })),
+      notificationFeed: {
+        kycPending: pendingKyc.map((c) => ({
+          id: c.id,
+          candidateName: `${c.user.firstName} ${c.user.lastName}`,
+          email: c.user.email,
+          submittedAt: c.updatedAt,
+        })),
+        newStudents: recentStudents.map((c) => {
+          const enrollment = c.batchEnrollments[0];
+          const academicClass = enrollment?.batch.academicClass;
+          return {
+            id: c.id,
+            candidateName: `${c.user.firstName} ${c.user.lastName}`,
+            email: c.user.email,
+            registeredAt: c.createdAt,
+            academicClassId: academicClass?.id ?? null,
+            classLevel: academicClass?.level ?? null,
+            className: academicClass?.name ?? null,
+            batchName: enrollment?.batch.name ?? null,
+          };
+        }),
+        testsCreated: recentTests.map((e) => ({
+          id: e.id,
+          title: e.title,
+          code: e.code,
+          status: e.status,
+          createdAt: e.createdAt,
+        })),
+      },
     };
+  }
+
+  async getSubmissionsInRange(tenantId: string, from: Date, to: Date) {
+    const rows = await this.prisma.examResult.findMany({
+      where: {
+        exam: { tenantId },
+        createdAt: { gte: from, lt: to },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      include: {
+        exam: { select: { title: true, code: true } },
+        candidate: { include: { user: { select: { firstName: true, lastName: true } } } },
+      },
+    });
+
+    return rows.map((r) => ({
+      id: r.id,
+      candidateName: `${r.candidate.user.firstName} ${r.candidate.user.lastName}`,
+      examTitle: r.exam.title,
+      examCode: r.exam.code,
+      score: r.totalScore,
+      maxScore: r.maxScore,
+      percentage: r.percentage,
+      submittedAt: r.createdAt,
+      message: `${r.candidate.user.firstName} ${r.candidate.user.lastName} submitted ${r.exam.title}`,
+    }));
   }
 
   private formatViolationLabel(eventType: string): string {

@@ -1,9 +1,10 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import type { AuthUser } from '@cbt/shared';
 import { Permission, getPermissionsForRoles } from '@cbt/shared';
 import { normalizeRoles, isAdmin, isTeacherOnly } from '@/lib/roles';
-import { syncAuthSession, clearAuthSession, hydrateAuthSession } from '@/lib/auth-session';
+import { syncAuthSession, hydrateAuthSession, clearAuthSession } from '@/lib/auth-session';
+import { clearMaterialsUploadSession } from '@/lib/materials-upload-session';
 import { getDefaultDashboardPath } from '@/lib/dashboard-nav';
 
 interface AuthState {
@@ -28,6 +29,7 @@ export const useAuthStore = create<AuthState>()(
       _hasHydrated: false,
       setHasHydrated: (value) => set({ _hasHydrated: value }),
       setAuth: async (user, accessToken, refreshToken) => {
+        clearMaterialsUploadSession();
         const roles = normalizeRoles(user.roles);
         const isAdminUser = await syncAuthSession(accessToken, refreshToken);
         set({
@@ -43,15 +45,19 @@ export const useAuthStore = create<AuthState>()(
         set({ accessToken, refreshToken });
       },
       logout: async () => {
-        await clearAuthSession();
+        clearMaterialsUploadSession();
+        const { accessToken } = useAuthStore.getState();
+        await clearAuthSession(accessToken);
         set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
       },
     }),
     {
       name: 'cbt-auth',
-      // Tokens live in HttpOnly cookies — only cache non-sensitive user display data.
+      storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
         user: state.user,
+        accessToken: state.accessToken,
+        refreshToken: state.refreshToken,
         isAuthenticated: state.isAuthenticated,
       }),
     },
@@ -59,23 +65,23 @@ export const useAuthStore = create<AuthState>()(
 );
 
 export async function syncSessionFromStore() {
-  const hydrated = await hydrateAuthSession();
+  const state = useAuthStore.getState();
+  const hydrated = await hydrateAuthSession(state.accessToken);
   if (hydrated) {
     useAuthStore.setState({
       user: hydrated.user,
       accessToken: hydrated.accessToken,
-      refreshToken: hydrated.refreshToken ?? null,
+      refreshToken: hydrated.refreshToken ?? state.refreshToken,
       isAuthenticated: true,
     });
     return hydrated.isAdmin;
   }
 
-  const state = useAuthStore.getState();
-  if (state.isAuthenticated && state.accessToken && state.refreshToken) {
-    return syncAuthSession(state.accessToken, state.refreshToken);
+  // Access token may be expired while the 3-hour refresh token is still valid.
+  if (state.isAuthenticated && state.refreshToken) {
+    return false;
   }
 
-  await clearAuthSession();
   useAuthStore.setState({
     user: null,
     accessToken: null,

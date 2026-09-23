@@ -134,7 +134,6 @@ export function EditCandidateDialog({ accessToken, candidate, open, onOpenChange
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
             onClick={() => updateMutation.mutate()}
             disabled={updateMutation.isPending || !form.firstName || !form.email}

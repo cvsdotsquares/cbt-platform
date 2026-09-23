@@ -1,8 +1,8 @@
 import {
   Controller, Get, Post, Delete, Param, Query, UseGuards, UseInterceptors,
-  UploadedFile, Body, BadRequestException, UsePipes, ValidationPipe, StreamableFile, ForbiddenException,
+  UploadedFile, UploadedFiles, Body, BadRequestException, UsePipes, ValidationPipe, StreamableFile, ForbiddenException,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { MaterialsService } from './materials.service';
@@ -79,6 +79,52 @@ export class MaterialsController {
       academicClassId,
       subjectId,
       subjectIds,
+    });
+  }
+
+  @Post('reconcile-subjects')
+  @RequirePermissions(Permission.MATERIAL_UPLOAD)
+  @ApiOperation({ summary: 'Re-tag uploads from file names (English, Maths, Science, …)' })
+  reconcileSubjects(@CurrentUser('tenantId') tenantId: string) {
+    return this.materialsService.reconcileSubjects(tenantId);
+  }
+
+  @Post('upload-batch')
+  @RequirePermissions(Permission.MATERIAL_UPLOAD)
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FilesInterceptor('files', 25, {
+    storage: memoryStorage(),
+    limits: { fileSize: MAX_UPLOAD_BYTES },
+  }))
+  @UsePipes(new ValidationPipe({ whitelist: false, forbidNonWhitelisted: false, transform: false }))
+  @ApiOperation({ summary: 'Upload multiple study materials in one request' })
+  uploadBatch(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('sub') userId: string,
+    @UploadedFiles() files: Express.Multer.File[] | undefined,
+    @Body() body: {
+      type?: MaterialType;
+      academicClassId?: string;
+      subjectId?: string;
+      academicSession?: string;
+      fullBook?: string | boolean;
+      titles?: string;
+    },
+  ) {
+    const list = (files ?? []).filter((f) => f?.buffer?.length);
+    if (!list.length) {
+      throw new BadRequestException('No files uploaded. Use field name "files".');
+    }
+    const titles = body.titles
+      ? body.titles.split('\n').map((t) => t.trim())
+      : undefined;
+    return this.materialsService.uploadBatch(tenantId, userId, list, {
+      type: body.type || MaterialType.NCERT,
+      academicClassId: body.academicClassId!,
+      subjectId: body.subjectId!,
+      academicSession: body.academicSession,
+      fullBook: body.fullBook === 'true' || body.fullBook === true || body.fullBook === '1',
+      titles,
     });
   }
 

@@ -31,6 +31,26 @@ export class UsersController {
     return this.usersService.getRoles(roles);
   }
 
+  @Get('meta/inactive-count')
+  @RequirePermissions(Permission.USER_READ)
+  @ApiOperation({ summary: 'Count inactive staff accounts pending removal' })
+  countInactiveStaff(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('sub') currentUserId: string,
+  ) {
+    return this.usersService.countInactiveStaff(tenantId, currentUserId);
+  }
+
+  @Delete('inactive')
+  @RequirePermissions(Permission.USER_DELETE)
+  @ApiOperation({ summary: 'Permanently delete all inactive staff accounts' })
+  purgeInactiveStaff(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('sub') currentUserId: string,
+  ) {
+    return this.usersService.purgeInactiveStaff(tenantId, currentUserId);
+  }
+
   @Get()
   @RequirePermissions(Permission.USER_READ)
   @ApiOperation({ summary: 'List users' })
@@ -39,8 +59,9 @@ export class UsersController {
     @Query('page') page?: number,
     @Query('limit') limit?: number,
     @Query('search') search?: string,
+    @Query('includeInactive') includeInactive?: boolean,
   ) {
-    return this.usersService.findAll(tenantId, page, limit, search);
+    return this.usersService.findAll(tenantId, page, limit, search, includeInactive);
   }
 
   @Get(':id')
@@ -74,7 +95,7 @@ export class UsersController {
 
   @Delete(':id')
   @RequirePermissions(Permission.USER_DELETE)
-  @ApiOperation({ summary: 'Deactivate user account' })
+  @ApiOperation({ summary: 'Permanently delete user account' })
   remove(
     @Param('id') id: string,
     @CurrentUser('tenantId') tenantId: string,

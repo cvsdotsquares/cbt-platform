@@ -11,6 +11,7 @@ import {
   MessageBody,
 
   OnGatewayConnection,
+  OnGatewayInit,
 
 } from '@nestjs/websockets';
 
@@ -19,6 +20,7 @@ import { Server, Socket } from 'socket.io';
 import { ExamEngineService } from '../modules/exam-engine/exam-engine.service';
 
 import { WsAuthService } from '../common/utils/ws-auth.service';
+import { WsBroadcastService } from '../common/ws/ws-broadcast.service';
 import { isOriginAllowed } from '../common/utils/cors-origins';
 
 @WebSocketGateway({
@@ -30,7 +32,7 @@ import { isOriginAllowed } from '../common/utils/cors-origins';
     credentials: true,
   },
 })
-export class ExamGateway implements OnGatewayConnection {
+export class ExamGateway implements OnGatewayConnection, OnGatewayInit {
   @WebSocketServer()
   server!: Server;
 
@@ -42,7 +44,13 @@ export class ExamGateway implements OnGatewayConnection {
 
     private wsAuth: WsAuthService,
 
+    private wsBroadcast: WsBroadcastService,
+
   ) {}
+
+  afterInit() {
+    this.wsBroadcast.registerExam(this.server);
+  }
 
 
 

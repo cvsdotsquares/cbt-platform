@@ -174,7 +174,6 @@ export function ExamAssignQuestionsDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
             onClick={() => addMutation.mutate()}
             disabled={!selected.size || addMutation.isPending}

@@ -9,6 +9,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import { useEffect } from 'react';
 import { usePermissions } from '@/hooks/use-permissions';
 import { getDefaultDashboardPath, getPermissionForPath } from '@/lib/dashboard-nav';
+import { useClearNavNotificationsOnVisit } from '@/hooks/use-clear-nav-notifications-on-visit';
 
 const AiAssistant = dynamic(
   () => import('@/components/ai/ai-assistant').then((mod) => mod.AiAssistant),
@@ -22,6 +23,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const { can } = usePermissions();
   const roles = normalizeRoles(user?.roles);
   const staffUser = isAdmin(roles);
+
+  useClearNavNotificationsOnVisit();
 
   useEffect(() => {
     if (!_hasHydrated) return;
@@ -47,7 +50,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <div className="relative flex h-dvh overflow-hidden mesh-bg">
       <div className="relative z-10 hidden h-full p-3 pr-0 lg:block">
-        <Sidebar compact className="h-full" />
+        <Sidebar className="h-full" />
       </div>
       <div className="relative z-10 flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header />

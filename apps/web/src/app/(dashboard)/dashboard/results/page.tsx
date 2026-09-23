@@ -6,24 +6,24 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { examsApi, resultsApi, type ExamListItem, type SubjectiveResponseItem } from '@/lib/api';
+import { curriculumApi, examsApi, resultsApi, type ExamListItem } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { usePermissions } from '@/hooks/use-permissions';
 import { Permission } from '@cbt/shared';
 import { toast } from '@/hooks/use-toast';
 import { PageHeader } from '@/components/layout/page-header';
+import { HorizontalTabScroller, ScrollableListPanel } from '@/components/layout/horizontal-tab-scroller';
 import { StatCard } from '@/components/layout/stat-card';
 import { EmptyState } from '@/components/layout/data-table';
 import { TableSkeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import {
-  Download, ClipboardCheck, Award, Users, BarChart3, CheckCircle2,
-  GraduationCap, ArrowLeft, Trophy, FileSpreadsheet, Sparkles, Eye,
+  Download, Award, Users, BarChart3, CheckCircle2,
+  GraduationCap, ArrowLeft, Trophy, FileSpreadsheet, Sparkles, Eye, Search, Trash2,
 } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
-import { Label } from '@/components/ui/label';
 import Link from 'next/link';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
@@ -33,6 +33,17 @@ function questionCount(exam: ExamListItem) {
   return (exam.sections || []).reduce((sum, s) => sum + (s._count?.questions ?? 0), 0);
 }
 
+type ClassTab = 'all' | string;
+type StatusTab = 'all' | 'published' | 'draft';
+
+function examClassId(exam: ExamListItem): string | undefined {
+  return exam.aiTestConfig?.batch?.academicClass?.id;
+}
+
+function isPublishedExamStatus(status: ExamListItem['status']) {
+  return status === 'PUBLISHED' || status === 'COMPLETED';
+}
+
 export default function ResultsPage() {
   const { accessToken } = useRequireAuth(true);
   const { can } = usePermissions();
@@ -40,16 +51,28 @@ export default function ResultsPage() {
   const teacherPortal = isTeacherOnly(normalizeRoles(user?.roles));
   const queryClient = useQueryClient();
   const [selectedExam, setSelectedExam] = useState('');
-  const [showGrading, setShowGrading] = useState(false);
-  const [gradeTarget, setGradeTarget] = useState<SubjectiveResponseItem | null>(null);
-  const [gradeMarks, setGradeMarks] = useState('');
+  const [classTab, setClassTab] = useState<ClassTab>('all');
+  const [statusTab, setStatusTab] = useState<StatusTab>('all');
+  const [searchTerm, setSearchTerm] = useState('');
   const [reviewResultId, setReviewResultId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string; code: string } | null>(null);
 
   const { data: exams, isLoading: examsLoading } = useQuery({
     queryKey: ['exams'],
     queryFn: () => examsApi.list(accessToken!),
     enabled: !!accessToken,
   });
+
+  const { data: classes } = useQuery({
+    queryKey: ['curriculum-classes'],
+    queryFn: () => curriculumApi.getClasses(accessToken!) as Promise<{ id: string; level: number; name: string }[]>,
+    enabled: !!accessToken,
+  });
+
+  const sortedClasses = useMemo(
+    () => [...(classes ?? [])].sort((a, b) => a.level - b.level),
+    [classes],
+  );
 
   const classTests = useMemo(() => {
     const items = (exams?.items ?? []).filter((e) => e.aiTestConfig);
@@ -64,16 +87,67 @@ export default function ResultsPage() {
     enabled: !!accessToken && !!selectedExam,
   });
 
-  const { data: subjective } = useQuery({
-    queryKey: ['subjective', selectedExam],
-    queryFn: () => resultsApi.subjective(accessToken!, selectedExam),
-    enabled: !!accessToken && !!selectedExam && showGrading,
-  });
-
   const resultItems = results?.items ?? [];
+
+  const classTabCounts = useMemo(() => {
+    const byClass = new Map<string, number>();
+    for (const exam of classTests) {
+      const id = examClassId(exam);
+      if (id) byClass.set(id, (byClass.get(id) ?? 0) + 1);
+    }
+    return byClass;
+  }, [classTests]);
+
+  const classTestsForClass = useMemo(() => {
+    if (classTab === 'all') return classTests;
+    return classTests.filter((exam) => examClassId(exam) === classTab);
+  }, [classTests, classTab]);
+
+  const publishedTestCount = useMemo(
+    () => classTestsForClass.filter((e) => isPublishedExamStatus(e.status)).length,
+    [classTestsForClass],
+  );
+  const draftTestCount = useMemo(
+    () => classTestsForClass.filter((e) => e.status === 'DRAFT').length,
+    [classTestsForClass],
+  );
+
+  const classTestsForTab = useMemo(() => {
+    if (statusTab === 'published') {
+      return classTestsForClass.filter((e) => isPublishedExamStatus(e.status));
+    }
+    if (statusTab === 'draft') {
+      return classTestsForClass.filter((e) => e.status === 'DRAFT');
+    }
+    return classTestsForClass;
+  }, [classTestsForClass, statusTab]);
+
+  const activeClassMeta = classTab !== 'all' ? sortedClasses.find((c) => c.id === classTab) : undefined;
+
+  const filteredClassTests = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return classTestsForTab;
+
+    return classTestsForTab.filter((exam) => {
+      const batch = exam.aiTestConfig?.batch;
+      const batchText = [batch?.academicClass?.name, batch?.name].filter(Boolean).join(' ');
+      const haystack = [exam.title, exam.code, batchText].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [classTestsForTab, searchTerm]);
+
+  const filteredResultItems = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return resultItems;
+
+    return resultItems.filter((r) => {
+      const candidateName = [r.candidate.user.firstName, r.candidate.user.lastName].filter(Boolean).join(' ').toLowerCase();
+      return candidateName.includes(query);
+    });
+  }, [resultItems, searchTerm]);
+
   const unpublishedCount = resultItems.filter((r) => !r.published).length;
   const publishedCount = resultItems.filter((r) => r.published).length;
-  const pendingGrading = (subjective || []).filter((r) => r.marksAwarded == null).length;
   const avgScore = resultItems.length
     ? resultItems.reduce((sum, r) => sum + r.percentage, 0) / resultItems.length
     : null;
@@ -99,17 +173,24 @@ export default function ResultsPage() {
     onError: (e: Error) => toast({ title: 'Publish failed', description: e.message, variant: 'destructive' }),
   });
 
-  const gradeMutation = useMutation({
-    mutationFn: ({ sessionId, questionId, marks }: { sessionId: string; questionId: string; marks: number }) =>
-      resultsApi.grade(accessToken!, sessionId, questionId, marks),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['subjective', selectedExam] });
-      queryClient.invalidateQueries({ queryKey: ['results', selectedExam] });
-      setGradeTarget(null);
-      toast({ title: 'Response graded', variant: 'success' });
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => examsApi.remove(accessToken!, id),
+    onSuccess: (_data, id) => {
+      queryClient.invalidateQueries({ queryKey: ['exams'] });
+      queryClient.removeQueries({ queryKey: ['results', id] });
+      if (selectedExam === id) setSelectedExam('');
+      setDeleteTarget(null);
+      toast({ title: 'Class test deleted', variant: 'success' });
     },
-    onError: (e: Error) => toast({ title: 'Grading failed', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({ title: 'Cannot delete exam', description: e.message, variant: 'destructive' }),
   });
+
+  function canDeleteExam(exam: ExamListItem) {
+    if (exam.status === 'COMPLETED') return false;
+    if ((exam._count?.sessions ?? 0) > 0) return false;
+    if ((exam._count?.results ?? 0) > 0) return false;
+    return true;
+  }
 
   async function exportCsv() {
     if (!accessToken || !selectedExam) return;
@@ -127,17 +208,8 @@ export default function ResultsPage() {
     }
   }
 
-  function formatAnswer(answer: unknown): string {
-    if (!answer) return '—';
-    if (typeof answer === 'object' && answer !== null && 'value' in answer) {
-      return String((answer as { value: unknown }).value);
-    }
-    return String(answer);
-  }
-
   function selectExam(id: string) {
     setSelectedExam(id);
-    setShowGrading(false);
   }
 
   // ─── No exam selected: pick a class test ─────────────────────────────────
@@ -155,16 +227,16 @@ export default function ResultsPage() {
         />
 
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3">
-          <StatCard title="Class tests" value={classTests.length} icon={FileSpreadsheet} accent="blue" />
+          <StatCard title="Class tests" value={classTestsForTab.length} icon={FileSpreadsheet} accent="blue" />
           <StatCard
             title="With submissions"
-            value={classTests.filter((e) => (e._count?.results ?? 0) > 0 || (e._count?.sessions ?? 0) > 0).length}
+            value={classTestsForTab.filter((e) => (e._count?.results ?? 0) > 0 || (e._count?.sessions ?? 0) > 0).length}
             icon={Users}
             accent="green"
           />
           <StatCard
             title="Published"
-            value={classTests.filter((e) => e.status === 'PUBLISHED' || e.status === 'COMPLETED').length}
+            value={classTestsForTab.filter((e) => isPublishedExamStatus(e.status)).length}
             icon={CheckCircle2}
             accent="violet"
           />
@@ -172,92 +244,309 @@ export default function ResultsPage() {
 
         {examsLoading ? (
           <TableSkeleton rows={4} cols={1} />
-        ) : classTests.length === 0 ? (
-          <Card className="surface-card">
-            <EmptyState
-              icon={Award}
-              title="No class tests yet"
-              description="Create and publish a class test first. Once students submit, their scores will appear here."
-            />
-            <div className="flex justify-center gap-3 pb-8">
-              <Button asChild>
-                <Link href="/dashboard/ai-tests">
-                  <Sparkles className="mr-2 h-4 w-4" /> Create Class Test
-                </Link>
-              </Button>
-              <Button variant="outline" asChild>
-                <Link href="/dashboard/exams">View Class Tests</Link>
-              </Button>
-            </div>
-          </Card>
         ) : (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-bold tracking-tight">Select a class test</h3>
-                <p className="text-sm text-muted-foreground">
-                  Choose a test to view student scores, calculate ranks, and publish results.
-                </p>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <HorizontalTabScroller className="min-w-0 flex-1 sm:pb-0">
+                <button
+                  type="button"
+                  onClick={() => setClassTab('all')}
+                  className={cn(
+                    'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                    classTab === 'all'
+                      ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                      : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+                  )}
+                >
+                  All classes
+                  {classTests.length > 0 && (
+                    <span className={cn(
+                      'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                      classTab === 'all' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                    )}>
+                      {classTests.length}
+                    </span>
+                  )}
+                </button>
+                {sortedClasses.map((cls) => {
+                  const active = classTab === cls.id;
+                  const count = classTabCounts.get(cls.id) ?? 0;
+                  return (
+                    <button
+                      key={cls.id}
+                      type="button"
+                      onClick={() => setClassTab(cls.id)}
+                      className={cn(
+                        'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                        active
+                          ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                          : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+                      )}
+                    >
+                      {cls.name}
+                      {count > 0 && (
+                        <span className={cn(
+                          'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                          active ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                        )}>
+                          {count}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </HorizontalTabScroller>
+              <div className="flex shrink-0 gap-2 pb-2 sm:pb-0">
+                <button
+                  type="button"
+                  onClick={() => setStatusTab((s) => (s === 'published' ? 'all' : 'published'))}
+                  className={cn(
+                    'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                    statusTab === 'published'
+                      ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                      : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+                  )}
+                >
+                  Published
+                  {publishedTestCount > 0 && (
+                    <span className={cn(
+                      'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                      statusTab === 'published' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                    )}>
+                      {publishedTestCount}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStatusTab((s) => (s === 'draft' ? 'all' : 'draft'))}
+                  className={cn(
+                    'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                    statusTab === 'draft'
+                      ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                      : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+                  )}
+                >
+                  Draft
+                  {draftTestCount > 0 && (
+                    <span className={cn(
+                      'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                      statusTab === 'draft' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                    )}>
+                      {draftTestCount}
+                    </span>
+                  )}
+                </button>
               </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {classTests.map((exam) => {
-                const batch = exam.aiTestConfig?.batch;
-                const sessions = exam._count?.sessions ?? 0;
-                const resultCount = exam._count?.results ?? 0;
-                const hasData = resultCount > 0 || sessions > 0;
-
-                return (
-                  <button
-                    key={exam.id}
-                    type="button"
-                    onClick={() => selectExam(exam.id)}
-                    className={cn(
-                      'group text-left rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all',
-                      'hover:border-primary/40 hover:shadow-md hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary transition-transform group-hover:scale-105">
-                        <Award className="h-5 w-5" />
-                      </div>
-                      <Badge variant={exam.status === 'PUBLISHED' || exam.status === 'COMPLETED' ? 'success' : 'secondary'}>
-                        {exam.status}
-                      </Badge>
-                    </div>
-
-                    <h4 className="mt-4 font-bold leading-snug line-clamp-2">{exam.title}</h4>
-                    <p className="mt-1 text-xs font-medium text-muted-foreground">{exam.code}</p>
-
-                    {batch && (
-                      <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                        <GraduationCap className="h-3 w-3" />
-                        {batch.academicClass.name} · {batch.name}
-                      </div>
-                    )}
-
-                    <div className="mt-4 flex flex-wrap gap-3 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <Users className="h-3 w-3" />
-                        {exam._count?.registrations ?? 0} students
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <BarChart3 className="h-3 w-3" />
-                        {resultCount > 0 ? `${resultCount} results` : hasData ? `${sessions} sessions` : 'No scores yet'}
-                      </span>
-                      <span>{questionCount(exam)} Qs</span>
-                    </div>
-
-                    <p className="mt-4 text-xs font-semibold text-primary opacity-0 transition-opacity group-hover:opacity-100">
-                      Open results →
-                    </p>
-                  </button>
-                );
-              })}
+            {classTests.length === 0 ? (
+              <Card className="surface-card">
+                <EmptyState
+                  icon={Award}
+                  title="No class tests yet"
+                  description="Create and publish a class test first. Once students submit, their scores will appear here."
+                />
+                <div className="flex justify-center gap-3 pb-8">
+                  <Button asChild>
+                    <Link href="/dashboard/ai-tests">
+                      <Sparkles className="mr-2 h-4 w-4" /> Create Class Test
+                    </Link>
+                  </Button>
+                  <Button variant="outline" asChild>
+                    <Link href="/dashboard/exams">View Class Tests</Link>
+                  </Button>
+                </div>
+              </Card>
+            ) : classTestsForTab.length === 0 ? (
+              <Card className="surface-card">
+                <EmptyState
+                  icon={GraduationCap}
+                  title={
+                    statusTab === 'published'
+                      ? 'No published class tests'
+                      : statusTab === 'draft'
+                        ? 'No draft class tests'
+                        : activeClassMeta
+                          ? `No class tests for ${activeClassMeta.name}`
+                          : 'No class tests in this class'
+                  }
+                  description={
+                    statusTab === 'published'
+                      ? 'Publish a class test from Class Tests, or switch to All classes to see every test.'
+                      : statusTab === 'draft'
+                        ? 'Drafts are tests still being set up. Create one from Create Class Test, or view all tests.'
+                        : 'Create a class test for this grade, or switch to All classes to see every test.'
+                  }
+                />
+                <div className="flex justify-center gap-3 pb-8">
+                  <Button variant="outline" onClick={() => setClassTab('all')}>
+                    View all classes
+                  </Button>
+                  <Button asChild>
+                    <Link href="/dashboard/ai-tests">
+                      <Sparkles className="mr-2 h-4 w-4" /> Create Class Test
+                    </Link>
+                  </Button>
+                </div>
+              </Card>
+            ) : (
+              <>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h3 className="text-lg font-bold tracking-tight">Select a class test</h3>
+                <p className="text-sm text-muted-foreground">
+                  {statusTab === 'published'
+                    ? activeClassMeta
+                      ? `Published class tests for ${activeClassMeta.name} — view scores, ranks, and publish results.`
+                      : 'Published class tests — view scores, ranks, and publish results to students.'
+                    : statusTab === 'draft'
+                      ? activeClassMeta
+                        ? `Draft class tests for ${activeClassMeta.name} — finish setup and publish before students can take them.`
+                        : 'Draft class tests — finish setup and publish before students can take them.'
+                      : activeClassMeta
+                        ? `Class tests for ${activeClassMeta.name} — view scores, ranks, and publish results.`
+                        : 'Choose a test to view student scores, calculate ranks, and publish results.'}
+                </p>
+              </div>
+              <div className="relative w-full max-w-sm">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search class tests..."
+                  className="pl-9"
+                />
+              </div>
             </div>
+
+            {filteredClassTests.length === 0 ? (
+              <Card className="surface-card">
+                <EmptyState
+                  icon={Award}
+                  title="No matching class tests"
+                  description={
+                    searchTerm
+                      ? 'Try a different test name, code, or batch.'
+                      : activeClassMeta
+                        ? `No tests match your filters for ${activeClassMeta.name}.`
+                        : 'Try a different test name, code, or batch.'
+                  }
+                />
+              </Card>
+            ) : (
+              <ScrollableListPanel maxHeightClass="max-h-[min(65vh,640px)]">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {filteredClassTests.map((exam) => {
+                  const batch = exam.aiTestConfig?.batch;
+                  const sessions = exam._count?.sessions ?? 0;
+                  const resultCount = exam._count?.results ?? 0;
+                  const hasData = resultCount > 0 || sessions > 0;
+
+                  return (
+                    <div
+                      key={exam.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => selectExam(exam.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          selectExam(exam.id);
+                        }
+                      }}
+                      className={cn(
+                        'group cursor-pointer text-left rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all',
+                        'hover:border-primary/40 hover:shadow-md hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary transition-transform group-hover:scale-105">
+                          <Award className="h-5 w-5" />
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Badge variant={exam.status === 'PUBLISHED' || exam.status === 'COMPLETED' ? 'success' : 'secondary'}>
+                            {exam.status}
+                          </Badge>
+                          {can(Permission.EXAM_DELETE) && (
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              disabled={!canDeleteExam(exam)}
+                              title={
+                                !canDeleteExam(exam)
+                                  ? 'Cannot delete: exam is completed or students have taken it'
+                                  : 'Delete class test'
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteTarget({ id: exam.id, title: exam.title, code: exam.code });
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+
+                      <h4 className="mt-4 font-bold leading-snug line-clamp-2">{exam.title}</h4>
+                      <p className="mt-1 text-xs font-medium text-muted-foreground">{exam.code}</p>
+
+                      {batch && (
+                        <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                          <GraduationCap className="h-3 w-3" />
+                          {batch.academicClass.name} · {batch.name}
+                        </div>
+                      )}
+
+                      <div className="mt-4 flex flex-wrap gap-3 text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <Users className="h-3 w-3" />
+                          {exam._count?.registrations ?? 0} students
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <BarChart3 className="h-3 w-3" />
+                          {resultCount > 0 ? `${resultCount} results` : hasData ? `${sessions} sessions` : 'No scores yet'}
+                        </span>
+                        <span>{questionCount(exam)} Qs</span>
+                      </div>
+
+                      <p className="mt-4 text-xs font-semibold text-primary opacity-0 transition-opacity group-hover:opacity-100">
+                        Open results →
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+              </ScrollableListPanel>
+            )}
+              </>
+            )}
           </div>
         )}
+
+        <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete class test?</DialogTitle>
+              <DialogDescription>
+                Permanently delete <span className="font-medium text-foreground">{deleteTarget?.title}</span> ({deleteTarget?.code}).
+                This removes all questions, results, and student assignments for this test.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="destructive"
+                disabled={deleteMutation.isPending}
+                onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+              >
+                {deleteMutation.isPending ? 'Deleting...' : 'Delete exam'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }
@@ -268,7 +557,7 @@ export default function ResultsPage() {
       <div className="space-y-4">
         <button
           type="button"
-          onClick={() => { setSelectedExam(''); setShowGrading(false); }}
+          onClick={() => setSelectedExam('')}
           className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -291,12 +580,6 @@ export default function ResultsPage() {
               {rankMutation.isPending ? 'Calculating…' : 'Calculate ranks'}
             </Button>
           )}
-          {can(Permission.RESULT_EVALUATE) && (
-            <Button variant="outline" size="sm" onClick={() => setShowGrading(!showGrading)}>
-              <ClipboardCheck className="mr-2 h-4 w-4" />
-              {showGrading ? 'Score table' : `Manual grading${pendingGrading > 0 ? ` (${pendingGrading})` : ''}`}
-            </Button>
-          )}
           {can(Permission.RESULT_READ) && (
             <Button variant="outline" size="sm" disabled={!resultItems.length} onClick={exportCsv}>
               <Download className="mr-2 h-4 w-4" /> Export CSV
@@ -314,13 +597,13 @@ export default function ResultsPage() {
         <StatCard title="Students scored" value={resultItems.length} icon={Users} accent="blue" />
         <StatCard
           title="Average %"
-          value={avgScore != null ? `${avgScore.toFixed(1)}%` : '—'}
+          value={avgScore != null ? `${Number.isInteger(avgScore) ? avgScore : avgScore.toFixed(1)}%` : '—'}
           icon={BarChart3}
           accent="violet"
         />
         <StatCard
           title="Top score"
-          value={topScore != null ? `${topScore.toFixed(1)}%` : '—'}
+          value={topScore != null ? `${Number.isInteger(topScore) ? topScore : topScore.toFixed(1)}` : '—'}
           icon={Trophy}
           accent="amber"
         />
@@ -359,69 +642,7 @@ export default function ResultsPage() {
         </Card>
       )}
 
-      {showGrading && can(Permission.RESULT_EVALUATE) && !isLoading && (
-        <Card className="surface-card overflow-hidden">
-          <CardHeader className="border-b border-border/60 pb-4">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <ClipboardCheck className="h-4 w-4 text-primary" />
-              Manual grading
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {(subjective || []).length === 0 ? (
-              <div className="p-8">
-                <EmptyState
-                  icon={ClipboardCheck}
-                  title="No subjective answers"
-                  description="This class test has no pending written/coding responses to grade."
-                />
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border/60 bg-muted/30 text-left text-xs uppercase tracking-wider text-muted-foreground">
-                      <th className="px-5 py-3 font-semibold">Student</th>
-                      <th className="px-5 py-3 font-semibold">Question</th>
-                      <th className="px-5 py-3 font-semibold">Type</th>
-                      <th className="px-5 py-3 font-semibold">Answer</th>
-                      <th className="px-5 py-3 font-semibold">Marks</th>
-                      <th className="px-5 py-3 font-semibold">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(subjective || []).map((r) => (
-                      <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-muted/20">
-                        <td className="px-5 py-3.5 font-medium">
-                          {r.session.candidate.user.firstName} {r.session.candidate.user.lastName}
-                        </td>
-                        <td className="px-5 py-3.5">{r.question.title}</td>
-                        <td className="px-5 py-3.5"><Badge variant="outline">{r.question.type}</Badge></td>
-                        <td className="max-w-xs truncate px-5 py-3.5 text-xs text-muted-foreground">{formatAnswer(r.answer)}</td>
-                        <td className="px-5 py-3.5">
-                          {r.marksAwarded != null ? `${r.marksAwarded}/${r.question.versions[0]?.marks ?? '?'}` : (
-                            <Badge variant="warning">Pending</Badge>
-                          )}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <Button size="sm" variant="outline" onClick={() => {
-                            setGradeTarget(r);
-                            setGradeMarks(r.marksAwarded != null ? String(r.marksAwarded) : '');
-                          }}>
-                            Grade
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {!showGrading && !isLoading && !isError && (
+      {!isLoading && !isError && (
         <Card className="surface-card overflow-hidden">
           <CardHeader className="border-b border-border/60 pb-4">
             <CardTitle className="flex items-center gap-2 text-base">
@@ -430,12 +651,27 @@ export default function ResultsPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            {resultItems.length === 0 ? (
+            <div className="border-b border-border/60 p-4">
+              <div className="relative max-w-sm">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search student name..."
+                  className="pl-9"
+                />
+              </div>
+            </div>
+            {filteredResultItems.length === 0 ? (
               <div className="p-8">
                 <EmptyState
                   icon={Award}
-                  title="No scores yet"
-                  description="Results appear after students submit this class test. Check Class Tests to confirm it’s published and assigned."
+                  title={searchTerm ? 'No matching results' : 'No scores yet'}
+                  description={
+                    searchTerm
+                      ? 'Try a different student name.'
+                      : 'Results appear after students submit this class test. Check Class Tests to confirm it’s published and assigned.'
+                  }
                 />
               </div>
             ) : (
@@ -452,7 +688,7 @@ export default function ResultsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {resultItems.map((r) => {
+                    {filteredResultItems.map((r) => {
                       const pct = Math.min(100, r.percentage);
                       return (
                         <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-muted/20">
@@ -484,7 +720,9 @@ export default function ResultsPage() {
                                   style={{ width: `${pct}%` }}
                                 />
                               </div>
-                              <span className="w-12 text-right tabular-nums font-semibold">{pct.toFixed(1)}%</span>
+                              <span className="w-12 text-right tabular-nums font-semibold">
+                                {Number.isInteger(pct) ? pct : pct.toFixed(1)}%
+                              </span>
                             </div>
                           </td>
                           <td className="px-5 py-3.5">
@@ -515,39 +753,15 @@ export default function ResultsPage() {
         accessToken={accessToken}
         onClose={() => setReviewResultId(null)}
         showCandidateName
+        manualGradingEnabled={can(Permission.RESULT_EVALUATE)}
         markedAnswerLabel="marked"
+        onGraded={() => {
+          if (selectedExam) {
+            void queryClient.invalidateQueries({ queryKey: ['results', selectedExam] });
+          }
+        }}
       />
 
-      <Dialog open={!!gradeTarget} onOpenChange={(open) => !open && setGradeTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Grade response</DialogTitle>
-            <DialogDescription>
-              {gradeTarget?.question.title} — max {gradeTarget?.question.versions[0]?.marks ?? 0} marks
-            </DialogDescription>
-          </DialogHeader>
-          <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg bg-muted/50 p-3 text-sm">
-            {gradeTarget ? formatAnswer(gradeTarget.answer) : ''}
-          </div>
-          <div className="space-y-2">
-            <Label>Marks awarded</Label>
-            <Input type="number" min={0} step={0.5} value={gradeMarks} onChange={(e) => setGradeMarks(e.target.value)} />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setGradeTarget(null)}>Cancel</Button>
-            <Button
-              disabled={gradeMutation.isPending || !gradeTarget}
-              onClick={() => gradeTarget && gradeMutation.mutate({
-                sessionId: gradeTarget.sessionId,
-                questionId: gradeTarget.questionId,
-                marks: parseFloat(gradeMarks) || 0,
-              })}
-            >
-              Save grade
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

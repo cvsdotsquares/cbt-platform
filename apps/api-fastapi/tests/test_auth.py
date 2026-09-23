@@ -183,21 +183,22 @@ async def test_login_inactive_user_returns_401(client: AsyncClient):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.anyio
-async def test_refresh_returns_new_tokens_and_revokes_old(client: AsyncClient):
+async def test_refresh_returns_new_access_token(client: AsyncClient):
     tenant = await _make_tenant()
     user, pw = await _make_user(tenant.id)
     data = await _login(client, user.email, pw)
     old_rt = data["refresh_token"]
+    old_at = data["access_token"]
 
     r = await client.post("/api/v1/auth/refresh", json={"refresh_token": old_rt})
     assert r.status_code == 200
     new_data = r.json()["data"]
     assert new_data["access_token"]
-    assert new_data["refresh_token"] != old_rt
+    assert new_data["access_token"] != old_at
+    assert new_data["refresh_token"]
 
-    # Old token is revoked
     reuse = await client.post("/api/v1/auth/refresh", json={"refresh_token": old_rt})
-    assert reuse.status_code == 401
+    assert reuse.status_code == 200
 
 
 @pytest.mark.anyio

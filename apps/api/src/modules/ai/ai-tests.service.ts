@@ -7,6 +7,7 @@ import { ExamsService } from '../exams/exams.service';
 import { GeneratedQuestion } from './ai.service';
 import { QuestionType, QuestionDifficulty } from '@prisma/client';
 import { createHash } from 'crypto';
+import { getDraftExamWindow } from '@cbt/shared';
 
 export interface RagGenerateParams {
   tenantId: string;
@@ -100,7 +101,24 @@ export class AiTestsService {
 
     const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
     if (!apiKey) {
-      throw new BadRequestException('OpenAI API key is required for AI question generation');
+      const fallbackQuestions = this.generateFallbackQuestions(
+        subject.name,
+        params.count ?? 10,
+        params.difficulty ?? 'MEDIUM',
+        params.types ?? ['MCQ'],
+      );
+      const avgConfidence = chunks.reduce((s, c) => s + c.score, 0) / chunks.length;
+      return {
+        questions: fallbackQuestions,
+        source: 'template' as const,
+        chunks,
+        sourceChunkIds: chunks.map((c) => c.id),
+        sourceMaterialIds: [...new Set(chunks.map((c) => c.materialId))],
+        sourceChapterId: chapterIds[0],
+        confidenceScore: avgConfidence,
+        contextUsed: chunks.length,
+        message: 'Set OPENAI_API_KEY to generate questions from OpenAI. Showing type-specific dummy questions.',
+      };
     }
 
     const count = params.count ?? 10;
@@ -153,6 +171,170 @@ export class AiTestsService {
     };
   }
 
+  /**
+   * Builds N dummy questions cycling through the requested types when no
+   * OPENAI_API_KEY is configured. Each type gets its own correctly-shaped
+   * content/options/correctAnswer via buildDummyQuestion — no shared MCQ
+   * template leaking into MSQ/SUBJECTIVE/CASE_STUDY/etc.
+   */
+  private generateFallbackQuestions(
+    subjectName: string,
+    count: number,
+    difficulty: string,
+    types: string[],
+  ): GeneratedQuestion[] {
+    const selectedTypes = types.length ? types : ['MCQ'];
+    return Array.from({ length: count }, (_, index) => {
+      const type = selectedTypes[index % selectedTypes.length];
+      return this.buildDummyQuestion(subjectName, type, difficulty, index);
+    });
+  }
+
+  /** Builds one type-correct dummy question. Used only when no OPENAI_API_KEY is set. */
+  private buildDummyQuestion(
+    subjectName: string,
+    type: string,
+    difficulty: string,
+    index: number,
+  ): GeneratedQuestion {
+    const qNum = index + 1;
+
+    if (type === 'SUBJECTIVE') {
+      return {
+        title: `${subjectName} SUBJECTIVE Q${qNum}`,
+        type,
+        difficulty,
+        content: {
+          text: `Explain one important concept from ${subjectName} and describe why it matters.`,
+        },
+        options: {},
+        correctAnswer: {
+          value: `A correct answer identifies and accurately explains a relevant concept from ${subjectName}.`,
+          rubric: 'Award marks for accuracy, relevant reasoning, and a clear explanation.',
+        },
+        marks: 4,
+        negativeMarks: 0,
+      };
+    }
+
+    if (type === 'CASE_STUDY') {
+      return {
+        title: `${subjectName} CASE_STUDY Q${qNum}`,
+        type,
+        difficulty,
+        content: {
+          text: `Case study: A learner is studying ${subjectName}. Read the scenario and explain how you would apply one key concept from this subject to a practical situation.`,
+        },
+        options: {},
+        correctAnswer: {
+          value: `A correct answer identifies a relevant concept from ${subjectName} and applies it correctly to the case.`,
+          rubric: 'Award marks for identifying a relevant concept, applying it to the case, and explaining the reasoning.',
+        },
+        marks: 5,
+        negativeMarks: 0,
+      };
+    }
+
+    if (type === 'MSQ') {
+      return {
+        title: `${subjectName} MSQ Q${qNum}`,
+        type,
+        difficulty,
+        content: {
+          text: `Which of the following statements are correct about a key concept from ${subjectName}? (Select all that apply)`,
+        },
+        options: {
+          a: `Statement A related to ${subjectName}`,
+          b: `Statement B related to ${subjectName}`,
+          c: `Statement C related to ${subjectName}`,
+          d: `Statement D related to ${subjectName}`,
+        },
+        correctAnswer: { value: ['a', 'c'] },
+        marks: 3,
+        negativeMarks: 0,
+      };
+    }
+
+    if (type === 'ASSERTION_REASON') {
+      return {
+        title: `${subjectName} ASSERTION_REASON Q${qNum}`,
+        type,
+        difficulty,
+        content: {
+          text: `Assertion (A): A key statement related to ${subjectName}.\nReason (R): A related explanatory statement.\nChoose the correct relationship between A and R.`,
+        },
+        options: {
+          a: 'Both A and R are true, and R is the correct explanation of A',
+          b: 'Both A and R are true, but R is NOT the correct explanation of A',
+          c: 'A is true, but R is false',
+          d: 'A is false, but R is true',
+        },
+        correctAnswer: { value: 'a' },
+        marks: 2,
+        negativeMarks: 0,
+      };
+    }
+
+    if (type === 'NUMERICAL') {
+      return {
+        title: `${subjectName} NUMERICAL Q${qNum}`,
+        type,
+        difficulty,
+        content: {
+          text: `Calculate the value related to a key numerical concept from ${subjectName}.`,
+        },
+        options: {
+          a: 'Option value 1',
+          b: 'Option value 2',
+          c: 'Option value 3',
+          d: 'Option value 4',
+        },
+        correctAnswer: { value: 'a' },
+        marks: 2,
+        negativeMarks: 0,
+      };
+    }
+
+    if (type === 'FILL_BLANK') {
+      return {
+        title: `${subjectName} FILL_BLANK Q${qNum}`,
+        type,
+        difficulty,
+        content: {
+          text: `Fill in the blank: The process related to ______ is a key concept in ${subjectName}.`,
+        },
+        options: {
+          a: 'Correct term',
+          b: 'Distractor term 1',
+          c: 'Distractor term 2',
+          d: 'Distractor term 3',
+        },
+        correctAnswer: { value: 'a' },
+        marks: 2,
+        negativeMarks: 0,
+      };
+    }
+
+    // Default: MCQ
+    return {
+      title: `${subjectName} MCQ Q${qNum}`,
+      type: 'MCQ',
+      difficulty,
+      content: {
+        text: `Which statement best explains a key concept from ${subjectName}?`,
+      },
+      options: {
+        a: `Correct explanation of a ${subjectName} concept`,
+        b: 'Incorrect distractor 1',
+        c: 'Incorrect distractor 2',
+        d: 'Incorrect distractor 3',
+      },
+      correctAnswer: { value: 'a' },
+      marks: 2,
+      negativeMarks: 0,
+    };
+  }
+
   private async getRecentQuestionHashes(tenantId: string, batchId?: string): Promise<Set<string>> {
     const records = await this.prisma.generatedQuestionRecord.findMany({
       where: { tenantId, ...(batchId ? { batchId } : {}) },
@@ -181,7 +363,7 @@ export class AiTestsService {
       FILL_BLANK: 'FILL_BLANK',
       FILL_IN_THE_BLANK: 'FILL_BLANK',
       SUBJECTIVE: 'SUBJECTIVE',
-      CASE_STUDY: 'MCQ',
+      CASE_STUDY: 'CASE_STUDY',
     };
     return aliases[key] ?? (fallback as QuestionType) ?? 'MCQ';
   }
@@ -199,8 +381,11 @@ export class AiTestsService {
 
   private normalizeGeneratedQuestion(
     q: GeneratedQuestion & { explanation?: string },
-    ctx: { subjectName: string; index: number; defaultType: string; defaultDifficulty: string },
+    ctx: { subjectName: string; index: number; defaultType: string; defaultDifficulty: string; allowedTypes: string[] },
   ): GeneratedQuestion & { explanation?: string } | null {
+    const returnedType = this.normalizeQuestionType(q.type, ctx.defaultType);
+    const normalizedType = ctx.allowedTypes.includes(returnedType) ? returnedType : ctx.defaultType;
+    const isSubjective = ['SUBJECTIVE', 'CASE_STUDY'].includes(normalizedType);
     const options = q.options || {};
     const normalizedOptions: Record<string, string> = {
       a: String(options.a ?? options.A ?? '').trim(),
@@ -209,13 +394,13 @@ export class AiTestsService {
       d: String(options.d ?? options.D ?? '').trim(),
     };
 
-    let correctValue = q.correctAnswer?.value ?? 'a';
+    let correctValue = q.correctAnswer?.value ?? (isSubjective ? '' : 'a');
     if (Array.isArray(correctValue)) {
       correctValue = String(correctValue[0] ?? 'a').toLowerCase();
     } else {
       correctValue = String(correctValue).toLowerCase();
     }
-    if (!['a', 'b', 'c', 'd'].includes(correctValue)) correctValue = 'a';
+    if (!isSubjective && !['a', 'b', 'c', 'd'].includes(correctValue)) correctValue = 'a';
 
     const rawTitle = q.title?.trim() ?? '';
     const rawText = q.content?.text?.trim() ?? '';
@@ -228,12 +413,14 @@ export class AiTestsService {
       return null;
     }
 
-    if (!this.areValidOptions(normalizedOptions, correctValue)) {
+    if (!isSubjective && !this.areValidOptions(normalizedOptions, correctValue)) {
       this.logger.warn(`Rejected AI question with invalid options: "${text.slice(0, 60)}"`);
       return null;
     }
 
-    const shuffled = this.shuffleMcqOptions(normalizedOptions, correctValue);
+    const shuffled = isSubjective
+      ? { options: {}, correct: correctValue }
+      : this.shuffleMcqOptions(normalizedOptions, correctValue);
 
     const title = rawTitle && rawTitle.toLowerCase() !== text.toLowerCase()
       ? rawTitle.slice(0, 120)
@@ -241,11 +428,11 @@ export class AiTestsService {
 
     return {
       title,
-      type: this.normalizeQuestionType(q.type, ctx.defaultType),
+      type: normalizedType,
       difficulty: this.normalizeDifficulty(q.difficulty, ctx.defaultDifficulty),
       content: { text },
       options: shuffled.options,
-      correctAnswer: { value: shuffled.correct },
+      correctAnswer: { value: shuffled.correct, rubric: q.correctAnswer?.rubric },
       marks: q.marks ?? 2,
       negativeMarks: q.negativeMarks ?? 0,
       explanation: q.explanation,
@@ -327,8 +514,8 @@ export class AiTestsService {
       ASSERTION_REASON: 'Assertion-Reason format with 4 standard options.',
       NUMERICAL: 'Numerical answer question with 4 options.',
       FILL_BLANK: 'Fill in the blank with 4 options.',
-      CASE_STUDY: 'Case-based question with scenario and 4 options.',
-      SUBJECTIVE: 'Short answer subjective question.',
+      CASE_STUDY: 'Case-based open-ended question with no options; include a reference answer and rubric.',
+      SUBJECTIVE: 'Short answer subjective question with no options; include a reference answer and rubric.',
     };
 
     const systemPrompt = `You are an expert school examination paper setter (NCERT / CBSE style).
@@ -341,8 +528,8 @@ CRITICAL RULES FOR content.text (the question shown to students):
 3. NEVER copy headings like "Nazism and Hitler's Rise" or "Forest Society and Colonialism" as the question.
 4. title is an internal short label for teachers only — content.text is what students see.
 5. Each question must test a specific fact, concept, cause-effect, date, person, event, or definition FROM the source text.
-6. All four options must be plausible and related to the question — not random unrelated terms.
-7. Options must be full phrases or clear answers, not bare chapter names.
+6. For MCQ/MSQ only, all four options must be plausible and related to the question.
+7. For SUBJECTIVE/CASE_STUDY, options must be an empty object and correctAnswer must contain a reference answer and rubric.
 8. Do NOT use outside knowledge. If the source lacks enough detail for a good question, omit that question.
 
 BAD example (NEVER do this):
@@ -364,11 +551,11 @@ ${retryNote ? `\nRETRY NOTE: ${retryNote}\n` : ''}
 SOURCE CONTEXT:
 ${context}
 
-Generate exactly ${count} high-quality MCQ-style questions grounded in the source text.
+Generate exactly ${count} high-quality questions grounded in the source text.
 Return JSON: { "questions": [ ... ] }
 Each item: title (short admin label), content.text (full student-facing question, min 30 chars),
 type (${types.join('|')}), difficulty (EASY|MEDIUM|HARD),
-options {a,b,c,d}, correctAnswer {value: "a"|"b"|"c"|"d"}, marks (use 2), negativeMarks (use 0)
+For MCQ/MSQ use options {a,b,c,d}; for SUBJECTIVE/CASE_STUDY use options {} and correctAnswer {value: reference answer, rubric: scoring criteria}; marks (use 2), negativeMarks (use 0)
 Vary the correct option across questions — do not always use "a".`;
 
     return { systemPrompt, userPrompt };
@@ -388,6 +575,7 @@ Vary the correct option across questions — do not always use "a".`;
     const baseUrl = this.config.get('OPENAI_BASE_URL') || 'https://api.openai.com/v1';
     const model = this.config.get('OPENAI_MODEL') || 'gpt-4o-mini';
     const isMsq = types.includes('MSQ');
+    const isSubjective = types.some((type) => ['SUBJECTIVE', 'CASE_STUDY'].includes(type));
 
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
@@ -425,13 +613,13 @@ Vary the correct option across questions — do not always use "a".`;
                       },
                       options: {
                         type: 'object',
-                        properties: {
+                        properties: isSubjective ? {} : {
                           a: { type: 'string' },
                           b: { type: 'string' },
                           c: { type: 'string' },
                           d: { type: 'string' },
                         },
-                        required: ['a', 'b', 'c', 'd'],
+                        required: isSubjective ? [] : ['a', 'b', 'c', 'd'],
                         additionalProperties: false,
                       },
                       correctAnswer: {
@@ -439,9 +627,10 @@ Vary the correct option across questions — do not always use "a".`;
                         properties: {
                           value: isMsq
                             ? { type: 'array', items: { type: 'string', enum: ['a', 'b', 'c', 'd'] } }
-                            : { type: 'string', enum: ['a', 'b', 'c', 'd'] },
+                            : { type: 'string' },
+                          rubric: { type: 'string' },
                         },
-                        required: ['value'],
+                        required: isSubjective ? ['value', 'rubric'] : ['value'],
                         additionalProperties: false,
                       },
                       marks: { type: 'number' },
@@ -525,6 +714,7 @@ Vary the correct option across questions — do not always use "a".`;
             index: normalized.length,
             defaultType: types[normalized.length % types.length],
             defaultDifficulty: difficulty,
+            allowedTypes: types,
           });
           if (!q) continue;
           const key = q.content.text.toLowerCase().trim();
@@ -646,6 +836,7 @@ Vary the correct option across questions — do not always use "a".`;
       syllabusScope?: string;
       durationMinutes?: number;
       assignToBatch?: boolean;
+      shuffleQuestions?: boolean;
     },
   ) {
     const title = await this.examsService.assertTitleUnique(tenantId, config.title);
@@ -680,25 +871,24 @@ Vary the correct option across questions — do not always use "a".`;
       );
     }
 
-    const now = new Date();
     const durationMinutes = config.durationMinutes ?? 60;
-    const start = new Date(now.getTime() + 60_000);
-    const end = new Date(start.getTime() + durationMinutes * 60_000);
+    const { start, end } = getDraftExamWindow(durationMinutes);
     const code = `AI-${Date.now().toString(36).toUpperCase()}`;
 
     const exam = await this.examsService.create(tenantId, userId, {
       title: config.title,
       code,
       type: 'AI_ASSESSMENT',
-      // Draft placeholder window — slightly ahead so past-start validation can't race `new Date()`.
+      // Draft window on the next 5-minute mark so publishing does not open the test immediately.
       startTime: start.toISOString(),
       endTime: end.toISOString(),
       settings: this.aiExamSettings(durationMinutes, {
         aiGenerated: true,
         subjectId: config.subjectId,
         chapterIds: config.chapterIds,
+        shuffleQuestions: config.shuffleQuestions ?? true,
       }),
-      securityPolicy: { proctoringEnabled: false, fullscreen: true, blockCopyPaste: true, blockRightClick: true },
+      securityPolicy: { proctoringEnabled: true, fullscreen: true, blockCopyPaste: true, blockRightClick: true },
       sections: [{ name: 'Section A', orderIndex: 0, durationMinutes }],
     });
 
@@ -774,6 +964,7 @@ Vary the correct option across questions — do not always use "a".`;
       syllabusScope?: string;
       durationMinutes?: number;
       assignToBatch?: boolean;
+      shuffleQuestions?: boolean;
     },
   ) {
     if (!config.batchId) {
@@ -795,10 +986,8 @@ Vary the correct option across questions — do not always use "a".`;
       ? studied.map(() => config.questionsPerSubject!)
       : this.distributeQuestionCounts(requestedTotal, studied.length);
 
-    const now = new Date();
     const duration = config.durationMinutes ?? 90;
-    const start = new Date(now.getTime() + 60_000);
-    const end = new Date(start.getTime() + duration * 60_000);
+    const { start, end } = getDraftExamWindow(duration);
     const code = `AI-ALL-${Date.now().toString(36).toUpperCase()}`;
 
     const exam = await this.examsService.create(tenantId, userId, {
@@ -812,8 +1001,9 @@ Vary the correct option across questions — do not always use "a".`;
         combinedSubjects: true,
         batchId: config.batchId,
         subjects: studied.map((s) => s.subjectName),
+        shuffleQuestions: config.shuffleQuestions ?? true,
       }),
-      securityPolicy: { proctoringEnabled: false, fullscreen: true, blockCopyPaste: true, blockRightClick: true },
+      securityPolicy: { proctoringEnabled: true, fullscreen: true, blockCopyPaste: true, blockRightClick: true },
       sections: studied.map((s, i) => ({
         name: s.subjectName,
         orderIndex: i,

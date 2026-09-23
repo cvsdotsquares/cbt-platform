@@ -134,7 +134,6 @@ export function CreateUserDialog({ accessToken, roles }: CreateUserDialogProps) 
             <p className="mt-1 text-xs text-muted-foreground">Each staff member has one role.</p>
           </div>
           <DialogFooter className="px-0">
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
             <Button
               type="submit"
               disabled={createMutation.isPending || !form.email || !form.password || !form.firstName}

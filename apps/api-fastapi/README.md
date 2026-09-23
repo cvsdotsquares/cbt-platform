@@ -54,12 +54,17 @@ cp .env.example .env
 
 ### 2. Run Development Server
 
+On **Windows (Python 3.14+)**, use the dev entrypoint so async PostgreSQL works (do not use `uvicorn --reload` directly):
+
 ```bash
-uvicorn app.main:app --reload --port 4000
+python run_dev.py
 ```
 
-- API Docs: `http://localhost:4000/docs`
-- Health Check: `http://localhost:4000/api/v1/health`
+Default port is **8000** (`PORT=8000`). On Linux/macOS you can also use `uvicorn app.main:app --reload --port 8000`.
+
+- API Docs: `http://localhost:8000/docs`
+- Health Check: `http://localhost:8000/api/v1/health`
+- Default admin (after seed/bootstrap): `admin@cbt-platform.com` / `Admin@123`
 
 ### 3. Database Migrations
 

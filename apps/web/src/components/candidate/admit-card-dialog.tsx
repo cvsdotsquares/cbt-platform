@@ -19,6 +19,8 @@ export type AdmitCard = {
   startTime: string;
   endTime: string;
   timezone?: string;
+  durationMinutes?: number | null;
+  passingScore?: number;
   venue: string;
   instructions: string[];
 };
@@ -78,6 +80,12 @@ export function AdmitCardDialog({ card, onClose }: AdmitCardDialogProps) {
                     <p className="text-muted-foreground">
                       {formatExamTimeRange(card.startTime, card.endTime, card.timezone || DEFAULT_EXAM_TIMEZONE)}
                     </p>
+                    {card.durationMinutes != null && card.durationMinutes > 0 && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Test duration once started: {card.durationMinutes} min
+                        {typeof card.passingScore === 'number' ? ` · Pass score ${card.passingScore}%` : ''}
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-start gap-3 rounded-lg border border-border/40 px-4 py-3">
@@ -102,7 +110,6 @@ export function AdmitCardDialog({ card, onClose }: AdmitCardDialogProps) {
               </div>
 
               <div className="flex justify-end gap-2 border-t border-border/60 pt-4 print:hidden">
-                <Button variant="outline" onClick={onClose}>Close</Button>
                 <Button onClick={handlePrint}>
                   <Printer className="mr-2 h-4 w-4" /> Print
                 </Button>

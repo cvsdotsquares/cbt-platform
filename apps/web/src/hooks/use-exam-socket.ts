@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import type { Socket } from 'socket.io-client';
-import { disconnectExamSocket, getExamSocket } from '@/lib/socket';
+import { connectExamSocket, disconnectExamSocket } from '@/lib/socket';
 
 type SaveAnswerPayload = {
   sessionId: string;
@@ -22,7 +22,15 @@ type PendingAnswer = {
 type HeartbeatResult = {
   timeRemainingSeconds: number;
   autoSubmitted: boolean;
+  paused?: boolean;
+  terminated?: boolean;
   result?: { totalScore: number; maxScore: number; percentage: number };
+};
+
+export type ProctorExamState = {
+  paused: boolean;
+  terminated: boolean;
+  message: string;
 };
 
 function emitAck<T>(socket: Socket, event: string, payload: unknown): Promise<T> {
@@ -39,31 +47,68 @@ function emitAck<T>(socket: Socket, event: string, payload: unknown): Promise<T>
 export function useExamSocket(sessionId: string | null, enabled: boolean) {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
+  const [proctorState, setProctorState] = useState<ProctorExamState>({
+    paused: false,
+    terminated: false,
+    message: '',
+  });
 
   useEffect(() => {
     if (!sessionId || !enabled) return;
 
-    const socket = getExamSocket();
-    if (!socket) return;
-    socketRef.current = socket;
+    let cancelled = false;
+    let detachListeners: (() => void) | undefined;
 
-    const onConnect = () => {
-      setConnected(true);
-      socket.emit('exam:join', { sessionId });
-    };
+    void connectExamSocket().then((socket) => {
+      if (cancelled || !socket) return;
+      socketRef.current = socket;
 
-    const onDisconnect = () => setConnected(false);
+      const onConnect = () => {
+        setConnected(true);
+        socket.emit('exam:join', { sessionId });
+      };
 
-    socket.connect();
-    socket.on('connect', onConnect);
-    socket.on('disconnect', onDisconnect);
-    if (socket.connected) onConnect();
+      const onDisconnect = () => setConnected(false);
+
+      const onPaused = (data: { message?: string }) => {
+        setProctorState({ paused: true, terminated: false, message: data.message || 'Exam paused by proctor' });
+      };
+
+      const onResumed = () => {
+        setProctorState({ paused: false, terminated: false, message: '' });
+      };
+
+      const onTerminated = (data: { message?: string }) => {
+        setProctorState({
+          paused: false,
+          terminated: true,
+          message: data.message || 'Session terminated by proctor',
+        });
+      };
+
+      socket.on('connect', onConnect);
+      socket.on('disconnect', onDisconnect);
+      socket.on('exam:paused', onPaused);
+      socket.on('exam:resumed', onResumed);
+      socket.on('exam:terminated', onTerminated);
+      if (socket.connected) onConnect();
+
+      detachListeners = () => {
+        socket.off('connect', onConnect);
+        socket.off('disconnect', onDisconnect);
+        socket.off('exam:paused', onPaused);
+        socket.off('exam:resumed', onResumed);
+        socket.off('exam:terminated', onTerminated);
+      };
+    });
 
     return () => {
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
+      cancelled = true;
+      detachListeners?.();
       disconnectExamSocket();
+      socketRef.current = null;
       setConnected(false);
+      setProctorState({ paused: false, terminated: false, message: '' });
     };
   }, [sessionId, enabled]);
 
@@ -93,7 +138,7 @@ export function useExamSocket(sessionId: string | null, enabled: boolean) {
   }, []);
 
   return useMemo(
-    () => ({ connected, saveAnswer, heartbeat, submit }),
-    [connected, saveAnswer, heartbeat, submit],
+    () => ({ connected, saveAnswer, heartbeat, submit, proctorState }),
+    [connected, saveAnswer, heartbeat, submit, proctorState],
   );
 }

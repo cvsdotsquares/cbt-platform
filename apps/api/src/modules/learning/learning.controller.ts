@@ -40,6 +40,13 @@ export class LearningController {
     return this.learningService.getRecommendations(candidate.id);
   }
 
+  @Get('institute/lessons')
+  @RequirePermissions(Permission.BATCH_READ)
+  @ApiOperation({ summary: 'NCERT chapters & syllabus progress for dashboard' })
+  instituteLessons(@CurrentUser() user: JwtPayload) {
+    return this.learningService.getInstituteLessons(user.tenantId, user);
+  }
+
   @Get('teacher/batch/:batchId/analytics')
   @RequirePermissions(Permission.LEARNING_MANAGE)
   @ApiOperation({ summary: 'Teacher batch analytics' })

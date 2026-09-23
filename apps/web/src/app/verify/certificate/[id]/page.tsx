@@ -98,7 +98,7 @@ export default function VerifyCertificatePage() {
                   <p className="font-medium">{new Date(data.issuedAt).toLocaleDateString()}</p>
                 </div>
                 <div>
-                  <p className="text-muted-foreground">Candidate</p>
+                  <p className="text-muted-foreground">Student</p>
                   <p className="font-medium">{data.candidateName}</p>
                 </div>
                 <div>

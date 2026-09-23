@@ -13,3 +13,19 @@ export function decodeJwtPayload<T = Record<string, unknown>>(token: string): T 
     return null;
   }
 }
+
+const ACCESS_TOKEN_REFRESH_SKEW_MS = 60_000;
+
+export function isAccessTokenExpiringSoon(token: string | null | undefined): boolean {
+  if (!token) return true;
+  const payload = decodeJwtPayload<{ exp?: number }>(token);
+  if (!payload?.exp) return true;
+  return payload.exp * 1000 <= Date.now() + ACCESS_TOKEN_REFRESH_SKEW_MS;
+}
+
+export function msUntilAccessTokenRefresh(token: string | null | undefined): number {
+  if (!token) return 0;
+  const payload = decodeJwtPayload<{ exp?: number }>(token);
+  if (!payload?.exp) return 0;
+  return Math.max(0, payload.exp * 1000 - Date.now() - ACCESS_TOKEN_REFRESH_SKEW_MS);
+}

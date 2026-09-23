@@ -54,6 +54,8 @@ class ExamService:
             created_by_id=user_id,
             is_active=True,
         )
+
+        console.log(f"Creating exam: {exam.title} by user {user_id}")
         self.db.add(exam)
         await self.db.commit()
         await self.db.refresh(exam)

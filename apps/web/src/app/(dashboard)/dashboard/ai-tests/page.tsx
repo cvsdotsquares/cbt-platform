@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,14 +9,14 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PageHeader } from '@/components/layout/page-header';
-import { aiApi, curriculumApi, batchesApi } from '@/lib/api';
+import { aiApi, curriculumApi, batchesApi, materialsApi } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { toast } from '@/hooks/use-toast';
 import { AiTestQuestionsReview } from '@/components/admin/ai-test-questions-review';
 import { cn } from '@/lib/utils';
 import {
   Sparkles, BookOpen, Layers, Clock, Hash, Shield, Loader2,
-  CheckCircle2, ArrowRight, GraduationCap, FileText, Check,
+  CheckCircle2, ArrowRight, GraduationCap, FileText, Check, Upload,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
@@ -48,16 +48,35 @@ const DIFFICULTY_OPTIONS = [
   { value: 'HARD', label: 'Hard', hint: 'Analysis & multi-step' },
 ] as const;
 
+const QUESTION_TYPE_OPTIONS = [
+  { value: 'MCQ', label: 'MCQ', hint: 'One correct option' },
+  { value: 'MSQ', label: 'MSQ', hint: 'Multiple correct options' },
+  { value: 'SUBJECTIVE', label: 'Subjective', hint: 'Text answer, AI graded' },
+  { value: 'CASE_STUDY', label: 'Case study', hint: 'Open-ended text answer' },
+] as const;
+
 const selectClass =
   'mt-1.5 flex h-10 w-full rounded-lg border border-input bg-background px-3 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
-function isDoneStatus(status: string) {
-  return status === 'COMPLETED';
-}
+const INITIAL_CREATE_FORM = {
+  title: '',
+  subjectId: '',
+  batchId: '',
+  chapterIds: [] as string[],
+  questionCount: 10,
+  questionsPerSubject: 5,
+  difficulty: 'MEDIUM',
+  syllabusScope: 'COMPLETED_ONLY',
+  durationMinutes: 90,
+  assignToBatch: true,
+  questionTypes: ['MCQ'] as string[],
+  shuffleQuestions: true,
+};
 
 export default function AiTestsPage() {
   const { accessToken } = useRequireAuth(true);
   const { user } = useAuthStore();
+  const queryClient = useQueryClient();
   const teacherPortal = isTeacherOnly(normalizeRoles(user?.roles));
   const [createdExam, setCreatedExam] = useState<{
     id: string;
@@ -66,19 +85,9 @@ export default function AiTestsPage() {
   } | null>(null);
   const [mode, setMode] = useState<TestMode>(teacherPortal ? 'single' : 'all');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [form, setForm] = useState({
-    title: '',
-    subjectId: '',
-    batchId: '',
-    chapterIds: [] as string[],
-    questionCount: 10,
-    questionsPerSubject: 5,
-    difficulty: 'MEDIUM',
-    syllabusScope: 'COMPLETED_ONLY',
-    durationMinutes: 90,
-    assignToBatch: true,
-    questionTypes: ['MCQ'],
-  });
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadTitle, setUploadTitle] = useState('');
+  const [form, setForm] = useState({ ...INITIAL_CREATE_FORM });
 
   useEffect(() => {
     if (teacherPortal) setMode('single');
@@ -109,6 +118,9 @@ export default function AiTestsPage() {
   );
 
   const selectedBatch = (batches ?? []).find((b) => b.id === form.batchId);
+  const uploadClass = selectedBatch
+    ? (classes ?? []).find((c) => c.level === selectedBatch.academicClass.level)
+    : undefined;
 
   const teacherSubjects = useMemo(() => {
     if (!teacherPortal || !selectedBatch?.teacherAssignments?.length) return [];
@@ -135,14 +147,78 @@ export default function AiTestsPage() {
     queryFn: () =>
       batchesApi.getSyllabusProgress(accessToken!, form.batchId, form.subjectId) as Promise<SyllabusSubject[]>,
     enabled: !!accessToken && singleSubjectMode && !!form.batchId && !!form.subjectId,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   });
 
-  const doneChapters = useMemo(() => {
-    const subjectEntry = (syllabusProgress ?? []).find((s) => s.subject.id === form.subjectId);
-    return (subjectEntry?.chapters ?? []).filter((ch) => isDoneStatus(ch.status));
-  }, [syllabusProgress, form.subjectId]);
+  const { data: indexedMaterials } = useQuery({
+    queryKey: ['materials-for-ai-tests'],
+    queryFn: () => materialsApi.list(accessToken!) as Promise<{
+      id: string;
+      status: string;
+      subjectId?: string | null;
+      subject?: { id: string; name: string } | null;
+      academicClass?: { level: number } | null;
+    }[]>,
+    enabled: !!accessToken && !!selectedBatch,
+  });
 
-  const doneChapterIdsKey = doneChapters.map((c) => c.id).join(',');
+  const subjectHasUploadedBook = (subjectId: string, classLevel: number) =>
+    (indexedMaterials ?? []).some(
+      (m) =>
+        m.status === 'READY'
+        && m.academicClass?.level === classLevel
+        && (m.subjectId === subjectId || m.subject?.id === subjectId),
+    );
+
+  const selectableChapters = useMemo(() => {
+    const list = syllabusProgress ?? [];
+    let subjectEntry = list.find((s) => s.subject.id === form.subjectId);
+    if (!subjectEntry && selectedSubject) {
+      subjectEntry = list.find(
+        (s) => s.subject.name.toLowerCase() === selectedSubject.name.toLowerCase(),
+      );
+    }
+    if (!subjectEntry && list.length === 1) subjectEntry = list[0];
+    return subjectEntry?.chapters ?? [];
+  }, [syllabusProgress, form.subjectId, selectedSubject]);
+
+  const selectableChapterIdsKey = selectableChapters.map((c) => c.id).join(',');
+
+  const subjectsMissingBooks = useMemo(() => {
+    if (!selectedBatch) return [];
+    const level = selectedBatch.academicClass.level;
+    return classSubjects.filter((s) => !subjectHasUploadedBook(s.id, level));
+  }, [selectedBatch, classSubjects, indexedMaterials]);
+
+  const uploadMutation = useMutation({
+    mutationFn: async () => {
+      if (!uploadFile) throw new Error('Choose a PDF or text document first');
+      if (!form.batchId || !form.subjectId || !uploadClass?.id) {
+        throw new Error('Choose a class, batch, and subject before uploading');
+      }
+      const data = new FormData();
+      data.append('file', uploadFile);
+      data.append('title', uploadTitle.trim() || uploadFile.name.replace(/\.[^.]+$/, ''));
+      data.append('type', 'NCERT');
+      data.append('academicClassId', uploadClass.id);
+      data.append('subjectId', form.subjectId);
+      data.append('academicSession', '2025-26');
+      data.append('fullBook', 'true');
+      const material = await materialsApi.upload(accessToken!, data) as { id?: string };
+      if (!material.id) throw new Error('Upload completed without a material id');
+      await materialsApi.reindex(accessToken!, material.id);
+      return material;
+    },
+    onSuccess: () => {
+      setUploadFile(null);
+      setUploadTitle('');
+      queryClient.invalidateQueries({ queryKey: ['curriculum-classes'] });
+      queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+      toast({ title: 'Document uploaded and indexed', description: 'Select the indexed chapters below to create your test.' });
+    },
+    onError: (e: Error) => toast({ title: 'Could not index document', description: e.message, variant: 'destructive' }),
+  });
 
   useEffect(() => {
     if (!teacherPortal || !form.batchId || form.subjectId) return;
@@ -151,11 +227,14 @@ export default function AiTestsPage() {
     }
   }, [teacherPortal, form.batchId, form.subjectId, teacherSubjects]);
 
-  // When subject/batch changes and done chapters load, default-select all of them
+  // When subject/batch changes, default-select all uploaded chapters (not only "Done" on batch)
   useEffect(() => {
     if (!singleSubjectMode || !form.subjectId || syllabusLoading) return;
-    setForm((f) => ({ ...f, chapterIds: doneChapterIdsKey ? doneChapterIdsKey.split(',') : [] }));
-  }, [singleSubjectMode, form.batchId, form.subjectId, syllabusLoading, doneChapterIdsKey]);
+    setForm((f) => ({
+      ...f,
+      chapterIds: selectableChapterIdsKey ? selectableChapterIdsKey.split(',') : [],
+    }));
+  }, [singleSubjectMode, form.batchId, form.subjectId, syllabusLoading, selectableChapterIdsKey]);
 
   const estimatedQuestions = useMemo(() => {
     if (mode === 'all') {
@@ -174,7 +253,7 @@ export default function AiTestsPage() {
   };
 
   const selectAllChapters = () => {
-    setForm((f) => ({ ...f, chapterIds: doneChapters.map((c) => c.id) }));
+    setForm((f) => ({ ...f, chapterIds: selectableChapters.map((c) => c.id) }));
   };
 
   const clearChapters = () => {
@@ -199,7 +278,7 @@ export default function AiTestsPage() {
 
   useEffect(() => {
     updateChapterScrollHints();
-  }, [doneChapters.length, syllabusLoading, form.subjectId]);
+  }, [selectableChapters.length, syllabusLoading, form.subjectId]);
 
   const createMutation = useMutation({
     mutationFn: () => {
@@ -210,6 +289,7 @@ export default function AiTestsPage() {
         syllabusScope: form.syllabusScope,
         assignToBatch: form.assignToBatch,
         questionTypes: form.questionTypes,
+        shuffleQuestions: form.shuffleQuestions,
         allSubjects: teacherPortal ? false : mode === 'all',
         durationMinutes: mode === 'all' && !teacherPortal
           ? form.durationMinutes
@@ -238,8 +318,11 @@ export default function AiTestsPage() {
         exam?: { id: string; title: string };
         questionCount?: number;
         message?: string;
+        source?: string;
       };
       const examId = d.exam?.id;
+      queryClient.invalidateQueries({ queryKey: ['exams'] });
+      queryClient.invalidateQueries({ queryKey: ['teacher-dashboard'] });
       if (!examId) {
         toast({ title: 'Draft exam created', description: d.message, variant: 'destructive' });
         return;
@@ -250,18 +333,40 @@ export default function AiTestsPage() {
         questionCount: d.questionCount ?? 0,
       });
       toast({
-        title: 'Draft exam created',
+        title: d.source === 'dummy' ? 'Draft created (fallback content)' : 'Draft exam created',
         description: d.message ?? 'Review AI-generated questions below, then publish from Class Tests.',
+        variant: d.source === 'dummy' ? 'destructive' : 'success',
       });
     },
     onError: (e: Error) => toast({ title: 'Could not create test', description: e.message, variant: 'destructive' }),
   });
 
+  const resetForNewTest = () => {
+    setCreatedExam(null);
+    setForm({
+      ...INITIAL_CREATE_FORM,
+      questionTypes: [...INITIAL_CREATE_FORM.questionTypes],
+    });
+    setMode(teacherPortal ? 'single' : 'all');
+    setShowAdvanced(false);
+    setUploadFile(null);
+    setUploadTitle('');
+    createMutation.reset();
+  };
+
+  const selectedSubjectMissingBook =
+    singleSubjectMode
+    && !!form.subjectId
+    && !!selectedBatch
+    && !subjectHasUploadedBook(form.subjectId, selectedBatch.academicClass.level);
+
   const canCreate =
     !!form.title.trim()
     && form.batchId
+    && form.questionTypes.length > 0
     && (mode === 'all' || !!form.subjectId)
-    && (!singleSubjectMode || form.chapterIds.length > 0)
+    && (!singleSubjectMode || (form.chapterIds.length > 0 && !selectedSubjectMissingBook))
+    && (mode !== 'all' || subjectsMissingBooks.length === 0)
     && !createdExam;
   const activeStep = createdExam ? 3 : createMutation.isPending ? 2 : 1;
 
@@ -280,14 +385,14 @@ export default function AiTestsPage() {
           examId={createdExam.id}
           examTitle={createdExam.title}
           questionCount={createdExam.questionCount}
-          onCreateAnother={() => setCreatedExam(null)}
+          onCreateAnother={resetForNewTest}
         />
       </div>
     );
   }
 
   return (
-    <div className="space-y-8">
+    <div className="min-w-0 space-y-8">
       <StepIndicator activeStep={activeStep} />
 
       <PageHeader
@@ -301,9 +406,58 @@ export default function AiTestsPage() {
         badge={teacherPortal ? 'Teacher · Assigned subject' : 'NCERT · AI'}
       />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_minmax(260px,320px)]">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(260px,320px)]">
         {/* Main form */}
         <div className="space-y-6">
+          {false && (
+            <Card className="border-primary/20 bg-primary/[0.03]">
+              <CardContent className="space-y-4 p-4 sm:p-5">
+                <div className="flex items-start gap-3">
+                  <Upload className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                  <div className="min-w-0">
+                    <p className="font-medium">Upload and index source document</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Choose a batch and subject above, then upload a PDF, TXT, or Markdown file. It will be indexed before chapters appear here.
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+                  <div className="min-w-0">
+                    <Label htmlFor="source-document">Document</Label>
+                    <Input
+                      id="source-document"
+                      className="mt-1.5 disabled:cursor-not-allowed disabled:opacity-60"
+                      type="file"
+                      accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+                      disabled
+                      onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <Label htmlFor="source-title">Document title</Label>
+                    <Input
+                      id="source-title"
+                      className="mt-1.5 disabled:cursor-not-allowed disabled:opacity-60"
+                      placeholder="Defaults to file name"
+                      value={uploadTitle}
+                      onChange={(e) => setUploadTitle(e.target.value)}
+                      disabled
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full sm:w-auto disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled
+                    onClick={() => uploadMutation.mutate()}
+                  >
+                    <Upload className="mr-2 h-4 w-4" />
+                    Upload & index
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
           <Card className="surface-card overflow-hidden border-primary/10">
             <div className="h-1 bg-gradient-to-r from-violet-500 via-primary to-indigo-500" />
             <CardHeader className="pb-2">
@@ -393,10 +547,10 @@ export default function AiTestsPage() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <BookOpen className="h-4 w-4 shrink-0 text-primary" />
-                          <Label className="text-sm font-semibold">Done chapters</Label>
-                          {!syllabusLoading && doneChapters.length > 0 && (
+                          <Label className="text-sm font-semibold">Chapters from uploads</Label>
+                          {!syllabusLoading && selectableChapters.length > 0 && (
                             <Badge variant="secondary" className="font-normal tabular-nums">
-                              {form.chapterIds.length}/{doneChapters.length}
+                              {form.chapterIds.length}/{selectableChapters.length}
                             </Badge>
                           )}
                         </div>
@@ -404,12 +558,12 @@ export default function AiTestsPage() {
                           Select the chapters this test should draw questions from.
                         </p>
                       </div>
-                      {doneChapters.length > 0 && (
+                      {selectableChapters.length > 0 && (
                         <div className="flex shrink-0 gap-1 rounded-lg border border-border/60 bg-background p-0.5 shadow-sm">
                           <button
                             type="button"
                             onClick={selectAllChapters}
-                            disabled={form.chapterIds.length === doneChapters.length}
+                            disabled={form.chapterIds.length === selectableChapters.length}
                             className="rounded-md px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-40"
                           >
                             All
@@ -426,12 +580,12 @@ export default function AiTestsPage() {
                       )}
                     </div>
 
-                    {doneChapters.length > 0 && (
+                    {selectableChapters.length > 0 && (
                       <div className="h-1 bg-muted">
                         <div
                           className="h-full bg-primary transition-all duration-300 ease-out"
                           style={{
-                            width: `${Math.round((form.chapterIds.length / doneChapters.length) * 100)}%`,
+                            width: `${Math.round((form.chapterIds.length / selectableChapters.length) * 100)}%`,
                           }}
                         />
                       </div>
@@ -451,23 +605,29 @@ export default function AiTestsPage() {
                             <Loader2 className="h-4 w-4 animate-spin" />
                             Loading chapters…
                           </div>
-                        ) : doneChapters.length === 0 ? (
+                        ) : selectedSubjectMissingBook ? (
+                          <div className="px-4 py-8 text-center">
+                            <p className="text-sm font-medium text-destructive">
+                              This book is not uploaded — first upload a book on Books &amp; Notes.
+                            </p>
+                          </div>
+                        ) : selectableChapters.length === 0 ? (
                           <div className="px-4 py-8 text-center">
                             <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-muted">
                               <BookOpen className="h-5 w-5 text-muted-foreground" />
                             </div>
-                            <p className="text-sm font-medium">No done chapters yet</p>
+                            <p className="text-sm font-medium">No indexed chapters yet</p>
                             <p className="mt-1 text-xs text-muted-foreground">
-                              Mark chapters as Done on{' '}
+                              Upload and index an NCERT book for this subject, or mark chapters on{' '}
                               <Link href="/dashboard/batches" className="font-medium text-primary underline-offset-2 hover:underline">
                                 Classes &amp; Batches
-                              </Link>{' '}
-                              to include them here.
+                              </Link>
+                              .
                             </p>
                           </div>
                         ) : (
                           <ul className="divide-y divide-border/50">
-                            {doneChapters.map((ch) => {
+                            {selectableChapters.map((ch) => {
                               const checked = form.chapterIds.includes(ch.id);
                               return (
                                 <li key={ch.id}>
@@ -520,7 +680,7 @@ export default function AiTestsPage() {
 
                     {(chapterScroll.canDown || chapterScroll.canUp) && (
                       <div className="border-t border-border/60 bg-muted/20 px-4 py-2 text-center text-[11px] text-muted-foreground">
-                        Scroll to see all {doneChapters.length} done chapters
+                        Scroll to see all {selectableChapters.length} chapters
                       </div>
                     )}
                   </div>
@@ -588,6 +748,46 @@ export default function AiTestsPage() {
                 {showAdvanced && (
                   <div className="space-y-4 border-t px-4 pb-4 pt-4">
                     <div>
+                      <Label className="mb-2 block">Question types</Label>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {QUESTION_TYPE_OPTIONS.map((type) => {
+                          const selected = form.questionTypes.includes(type.value);
+                          return (
+                            <label
+                              key={type.value}
+                              className={cn(
+                                'flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-all',
+                                selected
+                                  ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+                                  : 'hover:border-primary/30 hover:bg-muted/50',
+                              )}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() => {
+                                  setForm({
+                                    ...form,
+                                    questionTypes: selected
+                                      ? form.questionTypes.filter((value) => value !== type.value)
+                                      : [...form.questionTypes, type.value],
+                                  });
+                                }}
+                                className="mt-0.5 rounded"
+                              />
+                              <span>
+                                <span className="block text-sm font-medium">{type.label}</span>
+                                <span className="block text-[11px] text-muted-foreground">{type.hint}</span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Select one or more types. Subjective and Case study questions use text answers without options.
+                      </p>
+                    </div>
+                    <div>
                       <Label className="mb-2 block">Difficulty</Label>
                       <div className="grid gap-2 sm:grid-cols-3">
                         {DIFFICULTY_OPTIONS.map((d) => (
@@ -616,6 +816,15 @@ export default function AiTestsPage() {
                         className="rounded"
                       />
                       Auto-assign to all students in the batch
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={form.shuffleQuestions}
+                        onChange={(e) => setForm({ ...form, shuffleQuestions: e.target.checked })}
+                        className="rounded"
+                      />
+                      Shuffle question order for each student
                     </label>
                   </div>
                 )}
@@ -668,7 +877,7 @@ export default function AiTestsPage() {
         </div>
 
         {/* Summary sidebar */}
-        <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
+        <div className="min-w-0 space-y-4 lg:sticky lg:top-6 lg:self-start">
           <Card className="surface-card">
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Test summary</CardTitle>
@@ -696,12 +905,29 @@ export default function AiTestsPage() {
                     Subjects included
                   </p>
                   <div className="flex flex-wrap gap-1.5">
-                    {classSubjects.map((s) => (
-                      <Badge key={s.id} variant="secondary" className="text-xs font-normal">
-                        {s.name}
-                      </Badge>
-                    ))}
+                    {classSubjects.map((s) => {
+                      const missing = selectedBatch
+                        && !subjectHasUploadedBook(s.id, selectedBatch.academicClass.level);
+                      return (
+                        <Badge
+                          key={s.id}
+                          variant={missing ? 'destructive' : 'secondary'}
+                          className="text-xs font-normal"
+                        >
+                          {s.name}
+                        </Badge>
+                      );
+                    })}
                   </div>
+                  {subjectsMissingBooks.length > 0 && (
+                    <ul className="mt-2 space-y-1 text-xs text-destructive">
+                      {subjectsMissingBooks.map((s) => (
+                        <li key={s.id}>
+                          {s.name}: this book is not uploaded — first upload a book on Books &amp; Notes.
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 
@@ -709,6 +935,11 @@ export default function AiTestsPage() {
                 <div>
                   <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Subject</p>
                   <Badge variant="secondary">{selectedSubject.name}</Badge>
+                  {selectedSubjectMissingBook && (
+                    <p className="mt-2 text-xs text-destructive">
+                      This book is not uploaded — first upload a book on Books &amp; Notes.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -718,7 +949,7 @@ export default function AiTestsPage() {
                     Chapters ({form.chapterIds.length})
                   </p>
                   <div className="flex flex-wrap gap-1.5">
-                    {doneChapters
+                    {selectableChapters
                       .filter((ch) => form.chapterIds.includes(ch.id))
                       .map((ch) => (
                         <Badge key={ch.id} variant="secondary" className="text-xs font-normal">

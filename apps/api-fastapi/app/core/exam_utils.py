@@ -1,5 +1,6 @@
 import re
 from datetime import datetime, timedelta, timezone
+from math import ceil
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -13,6 +14,7 @@ from app.models.candidate import Candidate
 
 DEFAULT_EXAM_TIMEZONE = "Asia/Kolkata"
 DEFAULT_PAST_START_GRACE_MINUTES = 2
+DEFAULT_EXAM_START_STEP_MINUTES = 5
 CANDIDATE_VISIBLE_EXAM_STATUSES = frozenset({"PUBLISHED", "IN_PROGRESS", "COMPLETED"})
 
 # Mirror of NestJS Permission enum — only the exam-related subset used here.
@@ -45,6 +47,31 @@ def parse_exam_datetime(value: str, time_zone: str = DEFAULT_EXAM_TIMEZONE) -> d
 
     local_dt = parsed.replace(tzinfo=tz)
     return local_dt.astimezone(timezone.utc)
+
+
+def round_up_exam_start(
+    now: datetime | None = None,
+    step_minutes: int = DEFAULT_EXAM_START_STEP_MINUTES,
+    min_ahead_minutes: int = 1,
+) -> datetime:
+    """Next start instant on a 5-minute clock, at least `min_ahead_minutes` ahead."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_utc = now.astimezone(timezone.utc)
+    step_seconds = max(1, int(step_minutes)) * 60
+    min_start = now_utc.timestamp() + max(0, min_ahead_minutes) * 60
+    return datetime.fromtimestamp(ceil(min_start / step_seconds) * step_seconds, tz=timezone.utc)
+
+
+def get_draft_exam_window(
+    duration_minutes: int,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    minutes = int(duration_minutes) if duration_minutes and duration_minutes > 0 else 30
+    start = round_up_exam_start(now)
+    return start, start + timedelta(minutes=minutes)
 
 
 def validate_exam_schedule(
