@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
     JWT_EXPIRY_MINUTES: int = 30 
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
+    OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL: str = "gpt-4o-mini"
 
