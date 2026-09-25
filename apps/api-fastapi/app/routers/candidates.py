@@ -22,8 +22,15 @@ from app.services.candidate_context import (
     assert_exam_visible_to_candidate,
     require_candidate_id,
 )
+from app.services.roll_numbers import sync_batch_roll_numbers, sync_candidate_batches
 from app.services.teacher_scope import get_teacher_batch_ids, is_teacher_scoped
 from app.services.exam_engine import reconcile_candidate_sessions
+from app.services.kyc_document_ai import (
+    KycDocumentError,
+    review_kyc_document,
+    split_holder_name,
+    stored_mime_type,
+)
 from app.models.curriculum import BatchEnrollment
 
 router = APIRouter(prefix="/candidates", tags=["Candidates"])
@@ -108,7 +115,7 @@ async def my_dashboard(
     profile_row = await db.execute(
         text(
             """
-            SELECT c.registration_number, c.kyc_status, u.email, u.first_name, u.last_name
+            SELECT c.registration_number, c.kyc_status, c.profile_data, u.email, u.first_name, u.last_name
             FROM candidates c
             JOIN users u ON u.id = c.user_id
             WHERE c.id = :candidate_id
@@ -189,12 +196,19 @@ async def my_dashboard(
     percentages = [float(r[0]) for r in results_rows.all()]
     average_score = sum(percentages) / len(percentages) if percentages else None
 
+    profile_data = profile["profile_data"]
+    if isinstance(profile_data, str):
+        profile_data = json.loads(profile_data) if profile_data else {}
+    if not isinstance(profile_data, dict):
+        profile_data = {}
+
     return {
         "profile": {
             "registrationNumber": profile["registration_number"],
             "kycStatus": profile["kyc_status"],
             "email": profile["email"],
             "fullName": f"{profile['first_name']} {profile['last_name']}".strip(),
+            "kycDocument": _kyc_document_summary(profile_data),
         },
         "stats": {
             "totalExams": total_exams,
@@ -315,10 +329,26 @@ class CandidateSetBatch(BaseModel):
 class KycSubmitBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    document_type: str = Field(..., alias="documentType")
-    id_number: str = Field(..., alias="idNumber")
     file_name: str = Field(..., alias="fileName")
     file_data: str = Field(..., alias="fileData")
+
+
+def _kyc_document_summary(profile_data: dict) -> dict | None:
+    ai = profile_data.get("aiVerification")
+    ai = ai if isinstance(ai, dict) else {}
+    summary = {
+        "documentType": profile_data.get("documentType") or ai.get("documentType") or "",
+        "idNumber": profile_data.get("idNumber") or ai.get("extractedIdNumber") or "",
+        "name": profile_data.get("nameOnDocument") or ai.get("nameOnDocument") or "",
+        "dateOfBirth": profile_data.get("dateOfBirth") or ai.get("dateOfBirth") or "",
+    }
+    if not any(str(value).strip() for value in summary.values()):
+        return None
+    reasons = ai.get("reasons") if isinstance(ai.get("reasons"), list) else []
+    review_message = str(reasons[0]).strip() if reasons else ""
+    review_message = review_message.replace("the student profile", "your profile").rstrip(".")
+    summary["reviewMessage"] = review_message
+    return summary
 
 
 @router.post("/me/kyc")
@@ -330,9 +360,10 @@ async def submit_kyc(
     candidate = await db.execute(
         text(
             """
-            SELECT id, profile_data
-            FROM candidates
-            WHERE user_id = :user_id AND tenant_id = :tenant_id
+            SELECT c.id, c.profile_data, u.first_name, u.last_name
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.user_id = :user_id AND c.tenant_id = :tenant_id
             LIMIT 1
             """
         ),
@@ -342,19 +373,39 @@ async def submit_kyc(
     if not candidate_row:
         raise HTTPException(status_code=404, detail="Student profile not found")
 
-    if not body.id_number.strip() or not body.file_name.strip() or not body.file_data.strip():
-        raise HTTPException(status_code=400, detail="Document number and file are required")
+    if not body.file_name.strip() or not body.file_data.strip():
+        raise HTTPException(status_code=400, detail="A document file is required")
     if len(body.file_data) > 4_000_000:
         raise HTTPException(status_code=400, detail="Document is too large (max ~3MB)")
+
+    candidate_name = " ".join(
+        part.strip()
+        for part in (candidate_row["first_name"] or "", candidate_row["last_name"] or "")
+        if part and part.strip()
+    )
+    try:
+        mime_type = stored_mime_type(body.file_data, body.file_name)
+        decision = await review_kyc_document(
+            file_data=body.file_data,
+            file_name=body.file_name,
+            candidate_name=candidate_name,
+        )
+    except KycDocumentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    document_type = decision.document_type if decision.document_type != "UNKNOWN" else "UNKNOWN"
+    now = datetime.now(timezone.utc)
+    kyc_status = "VERIFIED" if decision.auto_verified else "PENDING"
+    verified_at = now if decision.auto_verified else None
 
     await db.execute(
         text(
             """
             DELETE FROM candidate_documents
-            WHERE candidate_id = :candidate_id AND type = :document_type
+            WHERE candidate_id = :candidate_id
             """
         ),
-        {"candidate_id": str(candidate_row["id"]), "document_type": body.document_type},
+        {"candidate_id": str(candidate_row["id"])},
     )
     await db.execute(
         text(
@@ -368,13 +419,11 @@ async def submit_kyc(
         {
             "id": str(uuid.uuid4()),
             "candidate_id": str(candidate_row["id"]),
-            "document_type": body.document_type,
+            "document_type": document_type,
             "file_name": body.file_name.strip(),
             "file_data": body.file_data,
             "file_size": len(body.file_data),
-            "mime_type": "application/pdf"
-            if body.file_name.lower().endswith(".pdf")
-            else "image/jpeg",
+            "mime_type": mime_type,
         },
     )
 
@@ -384,26 +433,67 @@ async def submit_kyc(
     profile_data = profile_data if isinstance(profile_data, dict) else {}
     profile_data.update(
         {
-            "idNumber": body.id_number.strip(),
-            "documentType": body.document_type,
-            "submittedAt": datetime.now(timezone.utc).isoformat(),
+            "idNumber": decision.extracted_id_number,
+            "documentType": document_type,
+            "nameOnDocument": decision.name_on_document,
+            "dateOfBirth": decision.date_of_birth,
+            "submittedAt": now.isoformat(),
+            "aiVerification": decision.as_profile(),
         }
     )
     await db.execute(
         text(
             """
             UPDATE candidates
-            SET kyc_status = 'PENDING', profile_data = CAST(:profile_data AS jsonb), updated_at = :now
+            SET kyc_status = :kyc_status,
+                kyc_verified_at = :verified_at,
+                profile_data = CAST(:profile_data AS jsonb),
+                updated_at = :now
             WHERE id = :candidate_id
             """
         ),
         {
+            "kyc_status": kyc_status,
+            "verified_at": verified_at,
             "profile_data": json.dumps(profile_data),
-            "now": datetime.now(timezone.utc),
+            "now": now,
             "candidate_id": str(candidate_row["id"]),
         },
     )
-    return {"kycStatus": "PENDING", "documentType": body.document_type}
+    if document_type == "DRIVING_LICENSE" and decision.name_on_document:
+        first_name, last_name = split_holder_name(decision.name_on_document)
+        if first_name:
+            await db.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET first_name = :first_name,
+                        last_name = :last_name,
+                        updated_at = :now
+                    WHERE id = :user_id AND tenant_id = :tenant_id
+                    """
+                ),
+                {
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "now": now,
+                    "user_id": str(current_user.id),
+                    "tenant_id": str(current_user.tenant_id),
+                },
+            )
+    extracted = {
+        "documentType": document_type,
+        "name": decision.name_on_document,
+        "idNumber": decision.extracted_id_number,
+        "dateOfBirth": decision.date_of_birth,
+    }
+    return {
+        "kycStatus": kyc_status,
+        "documentType": document_type,
+        "verificationSource": "AI" if decision.auto_verified else "ADMIN",
+        "message": decision.message,
+        "extracted": extracted,
+    }
 
 
 async def _get_candidate_row(
@@ -492,6 +582,32 @@ async def list_candidates(
         )
 
     where_sql = " AND ".join(filters)
+    order_sql = """
+            ORDER BY (
+                SELECT CASE
+                    WHEN be.roll_number ~ '^[0-9]+$' THEN CAST(be.roll_number AS integer)
+                    ELSE 2147483647
+                END
+                FROM batch_enrollments be
+                WHERE be.candidate_id = c.id
+                ORDER BY be.enrolled_at DESC
+                LIMIT 1
+            ) NULLS LAST,
+            LOWER(u.first_name),
+            LOWER(u.last_name),
+            c.created_at DESC
+    """
+    if unassigned:
+        order_sql = """
+            ORDER BY CASE
+                WHEN c.kyc_status IN ('PENDING', 'VERIFIED', 'REJECTED') THEN 0
+                ELSE 1
+            END,
+            COALESCE(NULLIF(c.profile_data->>'submittedAt', ''), '') DESC,
+            LOWER(u.first_name),
+            LOWER(u.last_name),
+            c.created_at DESC
+        """
     count_row = await db.execute(
         text(f"SELECT COUNT(*) FROM candidates c JOIN users u ON u.id = c.user_id WHERE {where_sql}"),
         params,
@@ -507,7 +623,7 @@ async def list_candidates(
             FROM candidates c
             JOIN users u ON u.id = c.user_id
             WHERE {where_sql}
-            ORDER BY c.created_at DESC
+            {order_sql}
             LIMIT :limit OFFSET :offset
             """
         ),
@@ -550,16 +666,22 @@ async def list_candidates(
                     },
                 }
             )
+        profile = row["profile_data"]
+        if isinstance(profile, str) and profile:
+            try:
+                profile = json.loads(profile)
+            except json.JSONDecodeError:
+                profile = {}
+        profile = profile if isinstance(profile, dict) else {}
+        submitted_at = str(profile.get("submittedAt") or "").strip() or None
         items.append(
             {
                 "id": row["id"],
                 "registrationNumber": row["registration_number"],
                 "kycStatus": row["kyc_status"],
+                "kycSubmittedAt": submitted_at if row["kyc_status"] != "NOT_SUBMITTED" else None,
                 "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
-                "createdBy": (json.loads(row["profile_data"]).get("createdBy")
-                              if isinstance(row["profile_data"], str) and row["profile_data"] else
-                              (row["profile_data"] or {}).get("createdBy")
-                              if isinstance(row["profile_data"], dict) else None),
+                "createdBy": profile.get("createdBy"),
                 "user": {
                     "firstName": row["first_name"] or "",
                     "lastName": row["last_name"] or "",
@@ -583,7 +705,7 @@ async def list_candidates(
 async def create_registration_invite_route(
     body: RegistrationInviteCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission(["candidate:invite", "candidate:create"])),
+    current_user: User = Depends(require_permission("candidate:invite")),
 ):
     tenant_id = str(current_user.tenant_id)
     app_url = settings.resolve_public_app_url()
@@ -609,7 +731,7 @@ async def list_registration_invites(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission(["candidate:invite", "candidate:create"])),
+    current_user: User = Depends(require_permission("candidate:invite")),
 ):
     tenant_id = str(current_user.tenant_id)
     offset = (page - 1) * limit
@@ -679,7 +801,7 @@ async def list_registration_invites(
 async def create_candidate(
     body: CandidateCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("candidate:create")),
 ):
     tenant_id = current_user.tenant_id
     email = body.email.strip().lower()
@@ -770,8 +892,8 @@ async def create_candidate(
         await db.execute(
             text(
                 """
-                INSERT INTO batch_enrollments (id, batch_id, candidate_id, roll_number, enrolled_at)
-                VALUES (:id, :batch_id, :candidate_id, :roll_number, :now)
+                INSERT INTO batch_enrollments (id, batch_id, candidate_id, roll_number, roll_locked, enrolled_at)
+                VALUES (:id, :batch_id, :candidate_id, :roll_number, :roll_locked, :now)
                 """
             ),
             {
@@ -779,9 +901,11 @@ async def create_candidate(
                 "batch_id": body.batch_id,
                 "candidate_id": candidate_id,
                 "roll_number": (body.roll_number or "").strip() or None,
+                "roll_locked": bool((body.roll_number or "").strip()),
                 "now": now,
             },
         )
+        await sync_batch_roll_numbers(db, body.batch_id)
 
     return {
         "id": user_id,
@@ -882,7 +1006,7 @@ async def verify_kyc(
     candidate_id: str,
     body: KycVerifyBody,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("candidate:kyc_verify")),
 ):
     tenant_id = str(current_user.tenant_id)
     existing = await db.execute(
@@ -940,7 +1064,7 @@ async def update_candidate(
     candidate_id: str,
     body: CandidateUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("candidate:update")),
 ):
     tenant_id = str(current_user.tenant_id)
     candidate = await _get_candidate_row(db, candidate_id, tenant_id)
@@ -1031,6 +1155,9 @@ async def update_candidate(
             },
         )
 
+    if body.first_name is not None or body.last_name is not None:
+        await sync_candidate_batches(db, candidate_id)
+
     updated = await _get_candidate_row(db, candidate_id, tenant_id)
     assert updated is not None
     return {
@@ -1051,7 +1178,7 @@ async def update_candidate(
 async def remove_candidate(
     candidate_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("candidate:delete")),
 ):
     tenant_id = str(current_user.tenant_id)
     candidate = await _get_candidate_row(db, candidate_id, tenant_id)
@@ -1073,6 +1200,15 @@ async def remove_candidate(
             detail="Cannot remove a student while they have an exam in progress",
         )
 
+    batch_ids = [
+        str(row)
+        for row in (
+            await db.execute(
+                text("SELECT DISTINCT batch_id FROM batch_enrollments WHERE candidate_id = :candidate_id"),
+                {"candidate_id": candidate_id},
+            )
+        ).scalars()
+    ]
     await db.execute(
         text("DELETE FROM sessions WHERE user_id = :user_id"),
         {"user_id": candidate["user_id"]},
@@ -1080,6 +1216,8 @@ async def remove_candidate(
     await db.execute(
         delete(BatchEnrollment).where(BatchEnrollment.candidate_id == candidate_id)
     )
+    for batch_id in batch_ids:
+        await sync_batch_roll_numbers(db, batch_id)
     await db.execute(
         text(
             """
@@ -1108,7 +1246,7 @@ async def set_candidate_batch(
     candidate_id: str,
     body: CandidateSetBatch,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("batch:manage")),
 ):
     tenant_id = str(current_user.tenant_id)
     candidate = await _get_candidate_row(db, candidate_id, tenant_id)
@@ -1116,9 +1254,20 @@ async def set_candidate_batch(
         raise HTTPException(status_code=404, detail="Student not found")
 
     if not body.batch_id:
+        previous = [
+            str(row)
+            for row in (
+                await db.execute(
+                    text("SELECT DISTINCT batch_id FROM batch_enrollments WHERE candidate_id = :candidate_id"),
+                    {"candidate_id": candidate_id},
+                )
+            ).scalars()
+        ]
         await db.execute(
             delete(BatchEnrollment).where(BatchEnrollment.candidate_id == candidate_id)
         )
+        for batch_id in previous:
+            await sync_batch_roll_numbers(db, batch_id)
         return {"batch": None}
 
     batch_row = await db.execute(
@@ -1139,25 +1288,47 @@ async def set_candidate_batch(
 
     roll_number = body.roll_number.strip() if body.roll_number else None
     now = datetime.now(timezone.utc)
+    previous = [
+        str(row)
+        for row in (
+            await db.execute(
+                text(
+                    """
+                    SELECT DISTINCT batch_id
+                    FROM batch_enrollments
+                    WHERE candidate_id = :candidate_id AND batch_id <> :batch_id
+                    """
+                ),
+                {"candidate_id": candidate_id, "batch_id": body.batch_id},
+            )
+        ).scalars()
+    ]
 
+    enrollment_id = str(uuid.uuid4())
     await db.execute(
         delete(BatchEnrollment).where(BatchEnrollment.candidate_id == candidate_id)
     )
     await db.execute(
         text(
             """
-            INSERT INTO batch_enrollments (id, batch_id, candidate_id, roll_number, enrolled_at)
-            VALUES (:id, :batch_id, :candidate_id, :roll_number, :now)
+            INSERT INTO batch_enrollments
+                (id, batch_id, candidate_id, roll_number, roll_locked, enrolled_at)
+            VALUES
+                (:id, :batch_id, :candidate_id, :roll_number, :roll_locked, :now)
             """
         ),
         {
-            "id": str(uuid.uuid4()),
+            "id": enrollment_id,
             "batch_id": body.batch_id,
             "candidate_id": candidate_id,
             "roll_number": roll_number,
+            "roll_locked": bool(roll_number),
             "now": now,
         },
     )
+    planned = await sync_batch_roll_numbers(db, body.batch_id)
+    for batch_id in previous:
+        await sync_batch_roll_numbers(db, batch_id)
 
     return {
         "batch": {
@@ -1169,6 +1340,6 @@ async def set_candidate_batch(
                 "name": batch["class_name"],
                 "level": batch["class_level"],
             },
-            "rollNumber": roll_number,
+            "rollNumber": planned.get(enrollment_id, roll_number),
         },
     }

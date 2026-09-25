@@ -5,6 +5,7 @@ import logging
 import random
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,6 +23,63 @@ from app.services.material_storage import extract_material_text, chunk_material_
 
 router = APIRouter(prefix="/ai", tags=["AI"])
 logger = logging.getLogger(__name__)
+
+_OPENAI_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+_OPENAI_ENV_NAMES = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL")
+
+
+def _refresh_openai_settings() -> None:
+    """Pick up a replaced API key without restarting the dev server."""
+    if not _OPENAI_ENV_FILE.is_file():
+        return
+    try:
+        contents = _OPENAI_ENV_FILE.read_text(encoding="utf-8-sig")
+    except OSError:
+        logger.warning("Could not read %s for OpenAI settings", _OPENAI_ENV_FILE)
+        return
+
+    values: dict[str, str] = {}
+    for raw_line in contents.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if name not in _OPENAI_ENV_NAMES:
+            continue
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        values[name] = value.strip()
+
+    if "OPENAI_API_KEY" in values:
+        settings.OPENAI_API_KEY = values["OPENAI_API_KEY"]
+    if values.get("OPENAI_BASE_URL"):
+        settings.OPENAI_BASE_URL = values["OPENAI_BASE_URL"]
+    if values.get("OPENAI_MODEL"):
+        settings.OPENAI_MODEL = values["OPENAI_MODEL"]
+
+
+def _ai_provider_error_detail(action: str, exc: httpx.HTTPStatusError) -> str:
+    status = exc.response.status_code
+    code = ""
+    try:
+        body = exc.response.json()
+    except ValueError:
+        body = None
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        code = str(error.get("code") or "")
+    if status in (401, 403) or code in {"token_invalidated", "invalid_api_key"}:
+        return (
+            "OpenAI rejected this API key. "
+            "Replace OPENAI_API_KEY in apps/api-fastapi/.env with a new key, then create the test again."
+        )
+    provider_detail = exc.response.text[:500].strip()
+    return (
+        f"AI provider rejected the {action} request ({status}): "
+        f"{provider_detail or exc.response.reason_phrase}"
+    )
 
 
 class GenerateReferenceAnswerBody(BaseModel):
@@ -722,13 +780,9 @@ async def _generate_questions(
                 break
 
     except httpx.HTTPStatusError as exc:
-        provider_detail = exc.response.text[:500].strip()
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"AI provider rejected the question request ({exc.response.status_code}): "
-                f"{provider_detail or exc.response.reason_phrase}"
-            ),
+            detail=_ai_provider_error_detail("question", exc),
         ) from exc
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException) as exc:
         logger.warning("OpenAI unreachable (%s); using offline fallback questions", exc)
@@ -810,6 +864,7 @@ def _openai_chat_completions_url() -> str:
 
 
 def _openai_request_headers() -> dict[str, str]:
+    _refresh_openai_settings()
     return {"Authorization": f"Bearer {settings.OPENAI_API_KEY.strip()}"}
 
 
@@ -1308,6 +1363,7 @@ async def create_ai_test(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _refresh_openai_settings()
     tenant_id = current_user.tenant_id
     user_id = current_user.id
     now = datetime.now(timezone.utc)
@@ -1602,6 +1658,7 @@ async def create_ai_test(
 
 @router.get("/status")
 async def ai_status():
+    _refresh_openai_settings()
     return {
         "openaiConfigured": bool(settings.OPENAI_API_KEY.strip()),
         "model": settings.OPENAI_MODEL,
@@ -1614,6 +1671,7 @@ async def generate_reference_answer(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _refresh_openai_settings()
     question_text = body.question_text.strip()
     if len(question_text) < 10:
         raise HTTPException(status_code=400, detail="Question text is too short")
@@ -1644,13 +1702,9 @@ async def generate_reference_answer(
             regenerate=body.regenerate,
         )
     except httpx.HTTPStatusError as exc:
-        provider_detail = exc.response.text[:500].strip()
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"AI provider rejected the answer request ({exc.response.status_code}): "
-                f"{provider_detail or exc.response.reason_phrase}"
-            ),
+            detail=_ai_provider_error_detail("answer", exc),
         ) from exc
     except (httpx.HTTPError, OSError) as exc:
         if _is_transient_openai_transport_error(exc):

@@ -11,6 +11,24 @@ import { dashboardApi } from '@/lib/api';
 import { usePermissions } from '@/hooks/use-permissions';
 import { formatViolationLabel, Permission } from '@cbt/shared';
 
+const KYC_SEEN_KEY = 'cbt-seen-kyc-submissions';
+
+function loadSeenKyc() {
+  if (typeof window === 'undefined') return new Set<string>();
+  try {
+    const raw = window.sessionStorage.getItem(KYC_SEEN_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set<string>(Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function saveSeenKyc(seen: Set<string>) {
+  if (typeof window === 'undefined') return;
+  window.sessionStorage.setItem(KYC_SEEN_KEY, JSON.stringify([...seen].slice(-100)));
+}
+
 function formatRegistrationNotificationMessage(item: {
   candidateName: string;
   email: string;
@@ -41,7 +59,13 @@ type DashboardStats = {
     eventType?: string;
   }[];
   notificationFeed?: {
-    kycPending?: { id: string; candidateName: string; email: string; submittedAt: string }[];
+    kycPending?: {
+      id: string;
+      candidateName: string;
+      email: string;
+      submittedAt: string;
+      status?: string;
+    }[];
     newStudents?: {
       id: string;
       candidateName: string;
@@ -157,21 +181,26 @@ export function useLiveNotifications() {
 
     const feed = data?.notificationFeed;
     if (canManageStudents && feed?.kycPending) {
+      const seen = seenKyc.current.size ? seenKyc.current : loadSeenKyc();
+      if (!seenKyc.current.size) seenKyc.current = seen;
+      let added = false;
       for (const item of feed.kycPending) {
-        if (!feedInitialized.current) {
-          seenKyc.current.add(item.id);
-          continue;
-        }
-        if (seenKyc.current.has(item.id)) continue;
-        seenKyc.current.add(item.id);
+        const key = `${item.id}:${item.submittedAt}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        added = true;
         add({
           type: 'kyc',
-          title: 'KYC pending review',
+          title: item.status === 'VERIFIED' ? 'KYC verified' : 'KYC pending review',
           message: `${item.candidateName} (${item.email})`,
           timestamp: item.submittedAt,
           href: `/dashboard/candidates?kycReview=${encodeURIComponent(item.id)}`,
         });
+        markClassWithNewStudent(UNASSIGNED_CLASS_HIGHLIGHT);
+        void queryClient.invalidateQueries({ queryKey: ['candidates'] });
+        void queryClient.invalidateQueries({ queryKey: ['candidates-stats'] });
       }
+      if (added) saveSeenKyc(seen);
     }
 
     if (canManageStudents && feed?.newStudents) {

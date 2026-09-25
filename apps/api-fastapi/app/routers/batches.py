@@ -18,11 +18,17 @@ from app.models.curriculum import (
     Chapter,
     Subject,
     SyllabusProgress,
+    SyllabusTopic,
     TeacherAssignment,
 )
 from app.models.material import StudyMaterial
 from app.models.user import User
-from app.services.teacher_scope import get_teacher_batch_ids, is_teacher_scoped
+from app.services.roll_numbers import sync_batch_roll_numbers
+from app.services.teacher_scope import (
+    get_teacher_batch_ids,
+    get_teacher_subject_ids,
+    is_teacher_scoped,
+)
 
 router = APIRouter(prefix="/batches", tags=["Batches"])
 
@@ -358,7 +364,13 @@ async def get_batch(
             JOIN candidates c ON c.id = be.candidate_id
             JOIN users u ON u.id = c.user_id
             WHERE be.batch_id = :batch_id
-            ORDER BY be.enrolled_at ASC
+            ORDER BY
+                CASE
+                    WHEN be.roll_number ~ '^[0-9]+$' THEN CAST(be.roll_number AS integer)
+                    ELSE 2147483647
+                END,
+                LOWER(u.first_name),
+                LOWER(u.last_name)
             """
         ),
         {"batch_id": batch_id},
@@ -507,6 +519,24 @@ async def delete_batch(
     }
 
 
+@router.get("/{batch_id}/next-roll-number")
+async def next_roll_number(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await _get_batch_or_404(db, batch_id, current_user.tenant_id)
+    rows = await db.execute(
+        text("SELECT roll_number FROM batch_enrollments WHERE batch_id = :batch_id"),
+        {"batch_id": batch_id},
+    )
+    used = {int(raw) for (raw,) in rows.all() if raw and str(raw).strip().isdigit()}
+    number = 1
+    while number in used:
+        number += 1
+    return {"rollNumber": str(number)}
+
+
 @router.post("/{batch_id}/enroll", status_code=status.HTTP_201_CREATED)
 async def enroll_student(
     batch_id: str,
@@ -541,37 +571,46 @@ async def enroll_student(
         )
     )
     existing = existing_result.scalar_one_or_none()
+    previous_batches = await db.execute(
+        text(
+            """
+            SELECT DISTINCT batch_id
+            FROM batch_enrollments
+            WHERE candidate_id = :candidate_id AND batch_id <> :batch_id
+            """
+        ),
+        {"candidate_id": body.candidate_id, "batch_id": batch_id},
+    )
+    previous_batch_ids = [str(row) for row in previous_batches.scalars()]
+
     if existing:
-        existing.roll_number = roll
-        await db.flush()
-        return {
-            "id": existing.id,
-            "batchId": existing.batch_id,
-            "candidateId": existing.candidate_id,
-            "rollNumber": existing.roll_number,
-        }
-
-    await db.execute(
-        delete(BatchEnrollment).where(
-            BatchEnrollment.candidate_id == body.candidate_id
+        enrollment = existing
+    else:
+        await db.execute(
+            delete(BatchEnrollment).where(
+                BatchEnrollment.candidate_id == body.candidate_id
+            )
         )
-    )
+        enrollment = BatchEnrollment(
+            id=str(uuid.uuid4()),
+            batch_id=batch_id,
+            candidate_id=body.candidate_id,
+            enrolled_at=now,
+        )
+        db.add(enrollment)
 
-    enrollment = BatchEnrollment(
-        id=str(uuid.uuid4()),
-        batch_id=batch_id,
-        candidate_id=body.candidate_id,
-        roll_number=roll,
-        enrolled_at=now,
-    )
-    db.add(enrollment)
+    enrollment.roll_locked = bool(roll)
+    enrollment.roll_number = roll
     await db.flush()
+    planned = await sync_batch_roll_numbers(db, batch_id)
+    for previous_batch_id in previous_batch_ids:
+        await sync_batch_roll_numbers(db, previous_batch_id)
 
     return {
         "id": enrollment.id,
         "batchId": enrollment.batch_id,
         "candidateId": enrollment.candidate_id,
-        "rollNumber": enrollment.roll_number,
+        "rollNumber": planned.get(enrollment.id, enrollment.roll_number),
     }
 
 
@@ -780,6 +819,42 @@ async def _batch_marked_chapter_ids(
     return {str(row[0]) for row in rows.all()}
 
 
+async def _subject_id_for_progress_target(
+    db: AsyncSession,
+    chapter_id: str | None,
+    topic_id: str | None,
+) -> str | None:
+    if chapter_id:
+        result = await db.execute(
+            select(Book.subject_id)
+            .join(Chapter, Chapter.book_id == Book.id)
+            .where(Chapter.id == chapter_id)
+        )
+        value = result.scalar_one_or_none()
+        return str(value) if value else None
+    if topic_id:
+        result = await db.execute(
+            select(Book.subject_id)
+            .join(Chapter, Chapter.book_id == Book.id)
+            .join(SyllabusTopic, SyllabusTopic.chapter_id == Chapter.id)
+            .where(SyllabusTopic.id == topic_id)
+        )
+        value = result.scalar_one_or_none()
+        return str(value) if value else None
+    return None
+
+
+async def _teacher_allowed_subject_ids(
+    db: AsyncSession,
+    current_user: User,
+    batch_id: str,
+) -> set[str] | None:
+    """None means the caller is not limited to assigned subjects."""
+    if not is_teacher_scoped(current_user):
+        return None
+    return set(await get_teacher_subject_ids(db, str(current_user.id), batch_id))
+
+
 @router.get("/{batch_id}/syllabus-progress")
 async def get_syllabus_progress(
     batch_id: str,
@@ -789,6 +864,15 @@ async def get_syllabus_progress(
 ):
     batch = await _get_batch_or_404(db, batch_id, current_user.tenant_id)
     class_level = batch.academic_class.level
+    allowed_subject_ids = await _teacher_allowed_subject_ids(db, current_user, batch_id)
+    if allowed_subject_ids is not None and not allowed_subject_ids:
+        return []
+    if (
+        allowed_subject_ids is not None
+        and subject_id
+        and subject_id not in allowed_subject_ids
+    ):
+        return []
 
     chapter_ids = await _uploaded_chapter_ids(
         db, current_user.tenant_id, class_level, subject_id
@@ -811,6 +895,7 @@ async def get_syllabus_progress(
         for ch in chapters_result.scalars().all()
         if ch.book.subject.academic_class.level == class_level
         and (not subject_id or ch.book.subject.id == subject_id)
+        and (allowed_subject_ids is None or ch.book.subject.id in allowed_subject_ids)
     ]
 
     progress_result = await db.execute(
@@ -866,6 +951,16 @@ async def update_syllabus_progress(
     current_user: User = Depends(get_current_user),
 ):
     await _get_batch_or_404(db, batch_id, current_user.tenant_id)
+    allowed_subject_ids = await _teacher_allowed_subject_ids(db, current_user, batch_id)
+    if allowed_subject_ids is not None:
+        target_subject_id = await _subject_id_for_progress_target(
+            db, body.chapter_id, body.topic_id
+        )
+        if not target_subject_id or target_subject_id not in allowed_subject_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only mark progress for a subject assigned to you",
+            )
 
     stmt = select(SyllabusProgress).where(SyllabusProgress.batch_id == batch_id)
     if body.chapter_id:

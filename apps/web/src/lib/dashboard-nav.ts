@@ -23,6 +23,7 @@ export const DASHBOARD_ROUTES: DashboardRoute[] = [
   { path: '/dashboard/ai', permission: Permission.QUESTION_CREATE },
   { path: '/dashboard/institutes', permission: Permission.TENANT_CREATE },
   { path: '/dashboard/users', permission: Permission.USER_READ },
+  { path: '/dashboard/permissions', permission: Permission.TENANT_DELETE },
   { path: '/dashboard/audit', permission: Permission.AUDIT_READ },
   { path: '/dashboard/settings', permission: Permission.TENANT_READ },
 ];

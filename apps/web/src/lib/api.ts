@@ -266,7 +266,20 @@ export type CandidateKycDetail = {
   profileData?: {
     documentType?: string;
     idNumber?: string;
+    nameOnDocument?: string;
+    dateOfBirth?: string;
     submittedAt?: string;
+    aiVerification?: {
+      outcome?: 'VERIFIED' | 'MANUAL_REVIEW';
+      documentType?: string;
+      confidence?: number;
+      extractedIdNumber?: string;
+      nameOnDocument?: string;
+      dateOfBirth?: string;
+      reasons?: string[];
+      note?: string;
+      checkedAt?: string;
+    };
   } | null;
   user: { email: string; firstName: string; lastName: string; phone?: string | null };
   documents: {
@@ -537,6 +550,8 @@ export const authApi = {
   },
   logout: (token: string) =>
     apiFetch('/auth/logout', { method: 'POST', ...authHeaders(token) }),
+  effectivePermissions: (token: string) =>
+    apiFetch<{ permissions: string[]; customized: boolean }>('/auth/effective-permissions', authHeaders(token)),
   sessions: (token: string) => apiFetch('/auth/sessions', authHeaders(token)),
   loginHistory: (token: string) => apiFetch('/auth/login-history', authHeaders(token)),
 };
@@ -698,8 +713,22 @@ export const candidatesApi = {
     apiFetch(`/candidates/${id}`, { method: 'DELETE', ...authHeaders(token) }),
   setBatch: (token: string, id: string, body: { batchId: string | null; rollNumber?: string }) =>
     apiFetch(`/candidates/${id}/batch`, { method: 'PATCH', body: JSON.stringify(body), ...authHeaders(token) }),
-  submitKyc: (token: string, body: { documentType: string; idNumber: string; fileName: string; fileData: string }) =>
-    apiFetch('/candidates/me/kyc', {
+  submitKyc: (
+    token: string,
+    body: { fileName: string; fileData: string },
+  ) =>
+    apiFetch<{
+      kycStatus: string;
+      documentType: string;
+      verificationSource: 'AI' | 'ADMIN';
+      message: string;
+      extracted: {
+        documentType: string;
+        name: string;
+        idNumber: string;
+        dateOfBirth: string;
+      };
+    }>('/candidates/me/kyc', {
       method: 'POST',
       body: JSON.stringify(body),
       ...authHeaders(token),
@@ -1071,6 +1100,35 @@ export const learningApi = {
 
 export const onboardingApi = {
   setupStatus: (token: string) => apiFetch('/onboarding/setup-status', authHeaders(token)),
+};
+
+export type RolePermissionMatrix = {
+  roles: { name: string; label: string; description: string }[];
+  columns: string[];
+  modules: { key: string; label: string; cells: Record<string, string> }[];
+  teachers: { id: string; name: string; email: string; assignments?: string[] }[];
+  granted: Record<string, string[]>;
+  teacherGranted: Record<string, string[]>;
+  defaults: Record<string, string[]>;
+  customized: Record<string, boolean>;
+  teacherCustomized: Record<string, boolean>;
+};
+
+export const rolePermissionsApi = {
+  matrix: (token: string) =>
+    apiFetch<RolePermissionMatrix>('/role-permissions', authHeaders(token)),
+  save: (token: string, role: string, permissions: string[], userId?: string) =>
+    apiFetch<RolePermissionMatrix>('/role-permissions', {
+      method: 'PUT',
+      body: JSON.stringify({ role, permissions, userId: userId || undefined }),
+      ...authHeaders(token),
+    }),
+  reset: (token: string, role: string, userId?: string) =>
+    apiFetch<RolePermissionMatrix>('/role-permissions', {
+      method: 'PUT',
+      body: JSON.stringify({ role, reset: true, permissions: [], userId: userId || undefined }),
+      ...authHeaders(token),
+    }),
 };
 
 export const tenantsApi = {

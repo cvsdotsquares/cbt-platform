@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Users, Upload, Sparkles, Award, Settings, UserCog, ClipboardList,
-  BookOpen, School, CircleHelp, GraduationCap,
+  BookOpen, School, CircleHelp, GraduationCap, ShieldCheck,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePermissions } from '@/hooks/use-permissions';
@@ -26,9 +26,10 @@ export const mainNav = [
   { href: '/dashboard/results', label: 'Results', icon: Award, permission: Permission.RESULT_READ },
 ];
 
-/** Simplified teacher-only portal — books live inside Syllabus per subject */
+/** Simplified teacher portal. NCERT Books appears only after an admin grants book upload. */
 export const teacherNav = [
   { href: '/dashboard/teacher', label: 'Home', icon: LayoutDashboard, permission: Permission.LEARNING_MANAGE, exact: true },
+  { href: '/dashboard/materials', label: 'NCERT Books', icon: Upload, permission: Permission.MATERIAL_UPLOAD },
   { href: '/dashboard/syllabus', label: 'Syllabus', icon: BookOpen, permission: Permission.CURRICULUM_READ },
   { href: '/dashboard/batches', label: 'Topic Progress', icon: School, permission: Permission.SYLLABUS_READ },
   { href: '/dashboard/ai-tests', label: 'Create Class Test', icon: Sparkles, permission: Permission.AI_GENERATE_TEST },
@@ -39,6 +40,7 @@ export const teacherNav = [
 
 export const settingsNav = [
   { href: '/dashboard/users', label: 'Staff & Teachers', icon: UserCog, permission: Permission.USER_READ },
+  { href: '/dashboard/permissions', label: 'Role Permissions', icon: ShieldCheck, permission: Permission.TENANT_DELETE },
   { href: '/dashboard/settings', label: 'Institute Settings', icon: Settings, permission: Permission.TENANT_READ },
 ];
 

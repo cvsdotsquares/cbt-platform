@@ -125,6 +125,7 @@ class BatchEnrollment(Base):
     batch_id: Mapped[str] = mapped_column(UuidStr, ForeignKey("batches.id"), nullable=False)
     candidate_id: Mapped[str] = mapped_column(UuidStr, nullable=False)
     roll_number: Mapped[str | None] = mapped_column(String, nullable=True)
+    roll_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     batch: Mapped["Batch"] = relationship("Batch", back_populates="enrollments")

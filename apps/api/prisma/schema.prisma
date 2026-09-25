@@ -828,6 +828,7 @@ model BatchEnrollment {
   batchId     String    @map("batch_id")
   candidateId String    @map("candidate_id")
   rollNumber  String?   @map("roll_number")
+  rollLocked  Boolean   @default(false) @map("roll_locked")
   enrolledAt  DateTime  @default(now()) @map("enrolled_at")
   batch       Batch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
   candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)

@@ -626,14 +626,20 @@ def require_permission(required_permissions: list[str] | str):
 
     async def permission_checker(
         current_user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
     ) -> User:
 
         user_roles = loaded_role_names(current_user)
 
-        # Check permissions mapped to user's roles
-        user_perms = set(
-            get_permissions_for_roles(user_roles)
+        from app.services.role_permission_matrix import effective_permissions_for_user
+
+        permissions, _customized = await effective_permissions_for_user(
+            db,
+            str(current_user.tenant_id) if current_user.tenant_id else None,
+            str(current_user.id) if current_user.id else None,
+            user_roles,
         )
+        user_perms = set(permissions)
 
         has_any = any(
             permission in user_perms

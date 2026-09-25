@@ -25,6 +25,7 @@ const pageTitles: Record<string, string> = {
   '/dashboard/teacher': 'Home',
   '/dashboard/questions': 'Question Bank',
   '/dashboard/users': 'Staff & Teachers',
+  '/dashboard/permissions': 'Role Permissions',
   '/dashboard/analytics': 'Analytics',
   '/dashboard/monitoring': 'Live Monitoring',
   '/dashboard/ai': 'AI Studio',

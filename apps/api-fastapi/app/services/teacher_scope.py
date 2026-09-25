@@ -19,6 +19,21 @@ def is_teacher_scoped(user) -> bool:
     return not any(r in ELEVATED_ROLES for r in roles)
 
 
+async def get_teacher_subject_ids(db: AsyncSession, user_id: str, batch_id: str) -> list[str]:
+    """Subjects this teacher is assigned to teach on one batch."""
+    rows = await db.execute(
+        text(
+            """
+            SELECT DISTINCT subject_id::text AS subject_id
+            FROM teacher_assignments
+            WHERE user_id = :user_id AND batch_id = :batch_id
+            """
+        ),
+        {"user_id": str(user_id), "batch_id": str(batch_id)},
+    )
+    return [str(row["subject_id"]) for row in rows.mappings() if row.get("subject_id")]
+
+
 async def get_teacher_batch_ids(db: AsyncSession, user_id: str) -> list[str]:
     rows = await db.execute(
         text(

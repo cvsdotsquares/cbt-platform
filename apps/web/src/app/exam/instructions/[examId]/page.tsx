@@ -2,16 +2,18 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
 import { DEFAULT_EXAM_TIMEZONE } from '@cbt/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { examsApi } from '@/lib/api';
+import { candidatesApi, examsApi } from '@/lib/api';
 import { useRequireCandidate } from '@/hooks/use-auth';
 import { Logo } from '@/components/layout/logo';
 import { getExamStatus } from '@/lib/exam-status';
 import { formatExamTimeRange } from '@/lib/exam-dates';
 import { normalizeSecurityPolicy } from '@/lib/exam-security-policy';
+import { kycAllowsExam, kycExamBlockMessage } from '@/lib/kyc-exam';
 import { AlertTriangle, Clock, Shield, CheckCircle2, ArrowLeft, Calendar } from 'lucide-react';
 
 type ExamInstructions = {
@@ -34,6 +36,14 @@ export default function ExamInstructionsPage() {
   const [exam, setExam] = useState<ExamInstructions | null>(null);
   const [agreed, setAgreed] = useState(false);
   const [error, setError] = useState('');
+
+  const { data: dashboard } = useQuery({
+    queryKey: ['candidate-dashboard'],
+    queryFn: () => candidatesApi.dashboard(accessToken!) as Promise<{ profile: { kycStatus: string } }>,
+    enabled: ready && !!accessToken,
+  });
+  const kycStatus = dashboard?.profile.kycStatus;
+  const kycReady = kycAllowsExam(kycStatus);
 
   useEffect(() => {
     if (!ready || !accessToken) return;
@@ -67,7 +77,7 @@ export default function ExamInstructionsPage() {
     sessions: exam.registration.sessions,
     submittedAttemptCount: exam.registration.submittedAttemptCount,
   });
-  const canBegin = agreed && !status.actionDisabled;
+  const canBegin = agreed && !status.actionDisabled && kycReady;
 
   return (
     <div className="min-h-screen mesh-bg">
@@ -99,6 +109,15 @@ export default function ExamInstructionsPage() {
             </div>
           </CardContent>
         </Card>
+
+        {kycStatus != null && !kycReady && (
+          <Card className="border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/20">
+            <CardContent className="flex items-start gap-3 p-4 text-sm text-amber-800 dark:text-amber-200">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <p>{kycExamBlockMessage(kycStatus)}</p>
+            </CardContent>
+          </Card>
+        )}
 
         {status.actionDisabled && status.phase !== 'submitted' && (
           <Card className="border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/20">
@@ -154,7 +173,7 @@ export default function ExamInstructionsPage() {
         </Card>
 
         <label className="flex cursor-pointer items-start gap-3 rounded-xl border bg-card p-5 shadow-card">
-          <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} className="mt-1" disabled={status.actionDisabled} />
+          <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} className="mt-1" disabled={status.actionDisabled || !kycReady} />
           <span className="text-sm">
             I, <strong>{user?.firstName} {user?.lastName}</strong>, confirm that I have read the instructions and am ready to begin this class test.
           </span>
@@ -169,7 +188,11 @@ export default function ExamInstructionsPage() {
           }}
         >
           <CheckCircle2 className="mr-2 h-5 w-5" />
-          {status.phase === 'in_progress' ? 'Resume Class Test' : 'Begin Class Test'}
+          {kycStatus != null && !kycReady
+            ? 'KYC required'
+            : status.phase === 'in_progress'
+              ? 'Resume Class Test'
+              : 'Begin Class Test'}
         </Button>
       </main>
     </div>

@@ -190,13 +190,17 @@ async def dashboard_stats(
               (
                 SELECT COALESCE(json_agg(t), '[]'::json)
                 FROM (
-                  SELECT c.id, c.updated_at,
+                  SELECT c.id, c.updated_at, c.kyc_status,
+                         COALESCE(c.profile_data->>'submittedAt', '') AS submitted_at,
                          u.first_name, u.last_name, u.email
                   FROM candidates c
                   JOIN users u ON u.id = c.user_id
-                  WHERE c.tenant_id = :tenant_id AND c.kyc_status = 'PENDING'
+                  WHERE c.tenant_id = :tenant_id
+                    AND c.kyc_status IN ('PENDING', 'VERIFIED')
+                    AND COALESCE(c.profile_data->>'submittedAt', '') <> ''
+                    AND c.updated_at > NOW() - INTERVAL '2 days'
                   ORDER BY c.updated_at DESC
-                  LIMIT 5
+                  LIMIT 10
                 ) t
               ) AS kyc_pending,
               (
@@ -356,7 +360,8 @@ async def dashboard_stats(
                     "id": r["id"],
                     "candidateName": f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip(),
                     "email": r.get("email"),
-                    "submittedAt": _iso(r.get("updated_at")),
+                    "status": r.get("kyc_status"),
+                    "submittedAt": r.get("submitted_at") or _iso(r.get("updated_at")),
                 }
                 for r in kyc_pending
             ],

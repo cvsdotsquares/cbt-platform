@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import dispose_engine
 from app.services.material_indexing import indexing_watchdog_loop, resume_stuck_indexing_jobs
-from app.routers import auth, exam, role, user, tenant, permission, role_permission, question, health, stubs, curriculum, batches, materials, candidates, ai, analytics, onboarding, results, learning, exam_sessions, proctoring
+from app.routers import auth, exam, role, user, tenant, permission, role_permission, role_matrix, question, health, stubs, curriculum, batches, materials, candidates, ai, analytics, onboarding, results, learning, exam_sessions, proctoring
 from app.middleware import RequestIDMiddleware, ResponseEnvelopeMiddleware
 
 
@@ -108,6 +108,11 @@ app.include_router(
 
 app.include_router(
     role_permission.router,
+    prefix=settings.API_V1_STR,
+)
+
+app.include_router(
+    role_matrix.router,
     prefix=settings.API_V1_STR,
 )
 
