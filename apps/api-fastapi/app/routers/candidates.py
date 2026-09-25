@@ -341,6 +341,7 @@ def _kyc_document_summary(profile_data: dict) -> dict | None:
         "idNumber": profile_data.get("idNumber") or ai.get("extractedIdNumber") or "",
         "name": profile_data.get("nameOnDocument") or ai.get("nameOnDocument") or "",
         "dateOfBirth": profile_data.get("dateOfBirth") or ai.get("dateOfBirth") or "",
+        "dateOfBirthPrecision": profile_data.get("dateOfBirthPrecision") or ai.get("dateOfBirthPrecision") or "",
     }
     if not any(str(value).strip() for value in summary.values()):
         return None
@@ -437,6 +438,7 @@ async def submit_kyc(
             "documentType": document_type,
             "nameOnDocument": decision.name_on_document,
             "dateOfBirth": decision.date_of_birth,
+            "dateOfBirthPrecision": decision.date_of_birth_precision,
             "submittedAt": now.isoformat(),
             "aiVerification": decision.as_profile(),
         }
@@ -486,6 +488,7 @@ async def submit_kyc(
         "name": decision.name_on_document,
         "idNumber": decision.extracted_id_number,
         "dateOfBirth": decision.date_of_birth,
+        "dateOfBirthPrecision": decision.date_of_birth_precision,
     }
     return {
         "kycStatus": kyc_status,

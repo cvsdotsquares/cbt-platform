@@ -57,13 +57,16 @@ Extract the document number, the person's name, and the date of birth exactly as
 Do not invent digits, names, or dates. If a field is unreadable or hidden, return an empty string.
 On a driving licence, nameOnDocument is only the licence holder's name from the Name field.
 Never use the Son/Daughter/Wife of line, or text marked S/O, D/O, W/O, or S/D/W. That line is a parent or spouse, not the holder.
-Write dateOfBirth as DD/MM/YYYY when a full date is printed. If only a year of birth is printed, return that year.
-Set readable to true only when the document type, number, name, and date of birth can be read.
+dateOfBirthText is the birth field copied exactly as printed, including its label. Examples: "DOB: 12/05/2004", "Year of Birth: 2004".
+dateOfBirth is DD/MM/YYYY only when a day, month, and year are all printed.
+Aadhaar cards often print "Year of Birth" or "YOB" instead of a full date. In that case dateOfBirth must be the four-digit year alone, such as 2004.
+Never replace a year of birth with 01/01/YYYY, 1 January, or any other placeholder day. Use 1 January only when that full date is printed on the card.
+Set readable to true only when the document type, number, name, and date or year of birth can be read.
 Set looksAuthentic to true only when the image is a clear photo or scan of that real document type, with its usual layout.
 Set looksAuthentic to false for selfies, random photos, blank pages, screenshots of forms, heavily cropped images, or a different document.
 confidence is a number from 0 to 1 for how sure you are of the type and that this is a genuine capture of that document.
 Return JSON only:
-{"documentType":"UNKNOWN","extractedIdNumber":"","nameOnDocument":"","dateOfBirth":"","readable":false,"looksAuthentic":false,"confidence":0,"reason":""}
+{"documentType":"UNKNOWN","extractedIdNumber":"","nameOnDocument":"","dateOfBirth":"","dateOfBirthText":"","readable":false,"looksAuthentic":false,"confidence":0,"reason":""}
 """
 
 
@@ -79,6 +82,7 @@ class KycAiDecision:
     extracted_id_number: str
     name_on_document: str
     date_of_birth: str = ""
+    date_of_birth_precision: str = ""
     reasons: list[str] = field(default_factory=list)
     message: str = ""
     note: str = ""
@@ -92,6 +96,7 @@ class KycAiDecision:
             "extractedIdNumber": self.extracted_id_number,
             "nameOnDocument": self.name_on_document,
             "dateOfBirth": self.date_of_birth,
+            "dateOfBirthPrecision": self.date_of_birth_precision,
             "reasons": self.reasons,
             "checkedAt": self.checked_at,
         }
@@ -126,6 +131,54 @@ def id_format_ok(document_type: str, id_number: str) -> bool:
     if document_type == "DRIVING_LICENSE":
         return bool(re.fullmatch(r"[A-Z0-9]{8,20}", normalized))
     return False
+
+
+_YEAR_ONLY_BIRTH = re.compile(
+    r"^(?:(?:year\s+of\s+birth|birth\s+year|y\.?\s*o\.?\s*b\.?|dob|d\.?\s*o\.?\s*b\.?|date\s+of\s+birth)\s*[:\-]?\s*)?(19\d{2}|20\d{2})$",
+    re.IGNORECASE,
+)
+
+
+def year_only_birth(value: str) -> str:
+    """A printed year of birth, without a day or month."""
+    raw = " ".join((value or "").replace(",", " ").split())
+    match = _YEAR_ONLY_BIRTH.fullmatch(raw)
+    if not match:
+        return ""
+    year = int(match.group(1))
+    if 1900 <= year <= date.today().year:
+        return str(year)
+    return ""
+
+
+def _is_january_first(iso_date: str) -> bool:
+    return bool(re.fullmatch(r"\d{4}-01-01", iso_date or ""))
+
+
+def resolve_date_of_birth(printed: str, structured: str) -> tuple[str, str]:
+    """Return the birth value and whether it is a full date or a year only.
+
+    Models often turn "Year of Birth: 2004" into 01/01/2004. Keep the year unless
+    the card text itself prints 1 January.
+    """
+    printed_year = year_only_birth(printed)
+    if printed_year:
+        return printed_year, "year"
+
+    printed_date = parse_date_of_birth(printed) if printed.strip() else ""
+    if printed_date:
+        return printed_date, "full"
+
+    structured_year = year_only_birth(structured)
+    if structured_year:
+        return structured_year, "year"
+
+    structured_date = parse_date_of_birth(structured) if structured.strip() else ""
+    if structured_date and _is_january_first(structured_date):
+        return structured_date[:4], "year"
+    if structured_date:
+        return structured_date, "full"
+    return "", ""
 
 
 def parse_date_of_birth(value: str) -> str:
@@ -249,7 +302,8 @@ def decide_kyc_auto_verification(
     if document_type == "DRIVING_LICENSE":
         name_on_document = driving_licence_holder_name(name_on_document)
     raw_dob = str(model.get("dateOfBirth") or "").strip()
-    date_of_birth = parse_date_of_birth(raw_dob) or raw_dob
+    printed_dob = str(model.get("dateOfBirthText") or "").strip()
+    date_of_birth, date_precision = resolve_date_of_birth(printed_dob, raw_dob)
     note = str(model.get("reason") or "").strip()[:240]
 
     reasons: list[str] = []
@@ -275,7 +329,7 @@ def decide_kyc_auto_verification(
             reasons.append("The name could not be read from the document")
         elif _name_tokens(candidate_name) and not names_loosely_match(candidate_name, name_on_document):
             reasons.append("The name on the document does not match the student profile")
-        if not parse_date_of_birth(raw_dob):
+        if not date_of_birth:
             reasons.append("The date of birth could not be read from the document")
 
     auto_verified = identified and not reasons
@@ -287,6 +341,7 @@ def decide_kyc_auto_verification(
         extracted_id_number=extracted,
         name_on_document=name_on_document,
         date_of_birth=date_of_birth,
+        date_of_birth_precision=date_precision,
         reasons=reasons,
         message=_student_message(auto_verified, document_type, reasons),
         note=note,
