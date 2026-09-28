@@ -2,6 +2,7 @@ import json
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from app.core.config import settings
 from app.routers.ai import (
@@ -171,3 +172,60 @@ async def test_resolve_requested_chapter_without_indexing(monkeypatch):
     )
 
     assert chapter_ids == ["chapter-1"]
+
+
+class _ProgressDb:
+    def __init__(self, completed: list[str]):
+        self.completed = completed
+
+    async def execute(self, statement, params):
+        sql = str(statement)
+        if "syllabus_progress" in sql:
+            return _Result([(chapter_id,) for chapter_id in self.completed])
+        return _Result([])
+
+
+@pytest.mark.anyio
+async def test_resolve_chapter_ids_keeps_only_done_chapters(monkeypatch):
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+
+    async def uploaded(*_args, **_kwargs):
+        return {"ch-done", "ch-studying"}
+
+    monkeypatch.setattr("app.routers.ai._uploaded_chapter_ids", uploaded)
+
+    chapter_ids = await _resolve_chapter_ids(
+        _ProgressDb(["ch-done"]),
+        tenant_id="tenant-1",
+        batch_id="batch-1",
+        subject_id="subject-1",
+        class_level=10,
+        chapter_ids_req=["ch-done", "ch-studying"],
+        syllabus_scope="SELECTED",
+    )
+
+    assert chapter_ids == ["ch-done"]
+
+
+@pytest.mark.anyio
+async def test_resolve_chapter_ids_does_not_fall_back_to_every_upload(monkeypatch):
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+
+    async def uploaded(*_args, **_kwargs):
+        return {"ch-1", "ch-2"}
+
+    monkeypatch.setattr("app.routers.ai._uploaded_chapter_ids", uploaded)
+
+    with pytest.raises(HTTPException) as exc:
+        await _resolve_chapter_ids(
+            _ProgressDb([]),
+            tenant_id="tenant-1",
+            batch_id="batch-1",
+            subject_id="subject-1",
+            class_level=10,
+            chapter_ids_req=None,
+            syllabus_scope="COMPLETED_ONLY",
+        )
+
+    assert exc.value.status_code == 400
+    assert "Done" in str(exc.value.detail)
