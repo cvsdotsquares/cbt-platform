@@ -171,7 +171,7 @@ export default function AiTestsPage() {
         && (m.subjectId === subjectId || m.subject?.id === subjectId),
     );
 
-  const selectableChapters = useMemo(() => {
+  const subjectChapters = useMemo(() => {
     const list = syllabusProgress ?? [];
     let subjectEntry = list.find((s) => s.subject.id === form.subjectId);
     if (!subjectEntry && selectedSubject) {
@@ -182,6 +182,12 @@ export default function AiTestsPage() {
     if (!subjectEntry && list.length === 1) subjectEntry = list[0];
     return subjectEntry?.chapters ?? [];
   }, [syllabusProgress, form.subjectId, selectedSubject]);
+
+  // Class tests draw only from chapters marked Done for this batch.
+  const selectableChapters = useMemo(
+    () => subjectChapters.filter((ch) => ch.status === 'COMPLETED'),
+    [subjectChapters],
+  );
 
   const selectableChapterIdsKey = selectableChapters.map((c) => c.id).join(',');
 
@@ -227,7 +233,7 @@ export default function AiTestsPage() {
     }
   }, [teacherPortal, form.batchId, form.subjectId, teacherSubjects]);
 
-  // When subject/batch changes, default-select all uploaded chapters (not only "Done" on batch)
+  // When subject/batch changes, select the chapters marked Done for this batch.
   useEffect(() => {
     if (!singleSubjectMode || !form.subjectId || syllabusLoading) return;
     setForm((f) => ({
@@ -547,7 +553,7 @@ export default function AiTestsPage() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <BookOpen className="h-4 w-4 shrink-0 text-primary" />
-                          <Label className="text-sm font-semibold">Chapters from uploads</Label>
+                          <Label className="text-sm font-semibold">Done chapters</Label>
                           {!syllabusLoading && selectableChapters.length > 0 && (
                             <Badge variant="secondary" className="font-normal tabular-nums">
                               {form.chapterIds.length}/{selectableChapters.length}
@@ -555,7 +561,7 @@ export default function AiTestsPage() {
                           )}
                         </div>
                         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                          Select the chapters this test should draw questions from.
+                          Only chapters marked Done for this batch. Choose which of those this test should use.
                         </p>
                       </div>
                       {selectableChapters.length > 0 && (
@@ -616,14 +622,29 @@ export default function AiTestsPage() {
                             <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-muted">
                               <BookOpen className="h-5 w-5 text-muted-foreground" />
                             </div>
-                            <p className="text-sm font-medium">No indexed chapters yet</p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Upload and index an NCERT book for this subject, or mark chapters on{' '}
-                              <Link href="/dashboard/batches" className="font-medium text-primary underline-offset-2 hover:underline">
-                                Classes &amp; Batches
-                              </Link>
-                              .
-                            </p>
+                            {subjectChapters.length > 0 ? (
+                              <>
+                                <p className="text-sm font-medium">No chapters marked Done</p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  This test only uses chapters marked Done. Mark them on{' '}
+                                  <Link href="/dashboard/batches" className="font-medium text-primary underline-offset-2 hover:underline">
+                                    Classes &amp; Batches
+                                  </Link>
+                                  .
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-sm font-medium">No indexed chapters yet</p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  Upload and index an NCERT book for this subject, or mark chapters on{' '}
+                                  <Link href="/dashboard/batches" className="font-medium text-primary underline-offset-2 hover:underline">
+                                    Classes &amp; Batches
+                                  </Link>
+                                  .
+                                </p>
+                              </>
+                            )}
                           </div>
                         ) : (
                           <ul className="divide-y divide-border/50">
@@ -1006,7 +1027,7 @@ export default function AiTestsPage() {
                 </li>
                 <li className="flex gap-2">
                   <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>Mark studied chapters on Classes &amp; Batches</span>
+                  <span>Mark chapters as Done on Classes &amp; Batches</span>
                 </li>
                 <li className="flex gap-2">
                   <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />

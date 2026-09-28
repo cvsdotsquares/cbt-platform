@@ -13,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import get_current_user, hash_password, require_permission
-from app.services.registration_invite import create_registration_invite
+from app.services.mail import send_registration_invite_email
+from app.services.registration_invite import (
+    EMAIL_USED_TWICE,
+    count_active_invites,
+    count_email_accounts,
+    create_registration_invite,
+    email_has_room,
+)
 from app.models.role import Role
 from app.models.user import User, UserStatus
 from app.models.user_role import UserRole
@@ -726,6 +733,15 @@ async def create_registration_invite_route(
         app_url=app_url,
     )
     await db.commit()
+    mailed = await send_registration_invite_email(
+        to=result["email"],
+        signup_url=result["signupUrl"],
+        first_name=body.first_name,
+        expires_at=result["expiresAt"],
+    )
+    result["emailSent"] = mailed.sent
+    if mailed.notice:
+        result["emailNotice"] = mailed.notice
     return result
 
 
@@ -809,11 +825,10 @@ async def create_candidate(
     tenant_id = current_user.tenant_id
     email = body.email.strip().lower()
 
-    existing = await db.execute(
-        select(User.id).where(User.email == email, User.tenant_id == tenant_id)
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Email already registered")
+    accounts = await count_email_accounts(db, str(tenant_id), email)
+    invites = await count_active_invites(db, str(tenant_id), email)
+    if not email_has_room(accounts, invites):
+        raise HTTPException(status_code=409, detail=EMAIL_USED_TWICE)
 
     role_result = await db.execute(select(Role).where(Role.name == "CANDIDATE"))
     candidate_role = role_result.scalar_one_or_none()
@@ -1077,17 +1092,12 @@ async def update_candidate(
     if body.email is not None:
         email = body.email.strip().lower()
         if email != candidate["email"]:
-            dup = await db.execute(
-                text(
-                    """
-                    SELECT id FROM users
-                    WHERE email = :email AND tenant_id = :tenant_id AND id != :user_id
-                    """
-                ),
-                {"email": email, "tenant_id": tenant_id, "user_id": candidate["user_id"]},
+            accounts = await count_email_accounts(
+                db, tenant_id, email, exclude_user_id=str(candidate["user_id"])
             )
-            if dup.scalar_one_or_none():
-                raise HTTPException(status_code=409, detail="Email already in use")
+            invites = await count_active_invites(db, tenant_id, email)
+            if not email_has_room(accounts, invites):
+                raise HTTPException(status_code=409, detail=EMAIL_USED_TWICE)
 
     if body.registration_number is not None:
         reg_no = body.registration_number.strip()

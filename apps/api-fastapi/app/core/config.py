@@ -82,6 +82,12 @@ class Settings(BaseSettings):
         description="Public web app URL for invite signup links",
     )
 
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASS: str = ""
+    SMTP_FROM: str = ""
+
     # ============================================================
     # LOWERCASE ALIASES (so both settings.PROJECT_NAME and 
     # settings.project_name work)
