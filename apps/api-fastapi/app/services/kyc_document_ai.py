@@ -53,17 +53,20 @@ _VERHOEFF_P = (
 
 _CLASSIFY_INSTRUCTIONS = """You inspect one identity-document image for a school exam KYC check.
 Classify it as exactly one of: AADHAAR, PAN, PASSPORT, DRIVING_LICENSE, UNKNOWN.
-Extract the document number, the person's name, and the date of birth exactly as printed.
-Do not invent digits, names, or dates. If a field is unreadable or hidden, return an empty string.
+Extract the document number, the person's name, and the year of birth exactly as printed.
+Do not invent digits, names, or years. If a field is unreadable or hidden, return an empty string.
 On a driving licence, nameOnDocument is only the licence holder's name from the Name field.
 Never use the Son/Daughter/Wife of line, or text marked S/O, D/O, W/O, or S/D/W. That line is a parent or spouse, not the holder.
-Write dateOfBirth as DD/MM/YYYY when a full date is printed. If only a year of birth is printed, return that year.
-Set readable to true only when the document type, number, name, and date of birth can be read.
+dateOfBirthText is the birth field copied exactly as printed, including its label. Examples: "Year of Birth: 2004", "YOB: 2004", "DOB: 12/05/2004".
+dateOfBirth is the four-digit year of birth only, such as 2004.
+Read that year from "Year of Birth", "YOB", or the year inside a printed date of birth. Never return a day or month, and never invent 01/01/YYYY.
+Aadhaar cards often print only the year of birth. That year is enough.
+Set readable to true only when the document type, number, name, and year of birth can be read.
 Set looksAuthentic to true only when the image is a clear photo or scan of that real document type, with its usual layout.
 Set looksAuthentic to false for selfies, random photos, blank pages, screenshots of forms, heavily cropped images, or a different document.
 confidence is a number from 0 to 1 for how sure you are of the type and that this is a genuine capture of that document.
 Return JSON only:
-{"documentType":"UNKNOWN","extractedIdNumber":"","nameOnDocument":"","dateOfBirth":"","readable":false,"looksAuthentic":false,"confidence":0,"reason":""}
+{"documentType":"UNKNOWN","extractedIdNumber":"","nameOnDocument":"","dateOfBirth":"","dateOfBirthText":"","readable":false,"looksAuthentic":false,"confidence":0,"reason":""}
 """
 
 
@@ -79,6 +82,7 @@ class KycAiDecision:
     extracted_id_number: str
     name_on_document: str
     date_of_birth: str = ""
+    date_of_birth_precision: str = ""
     reasons: list[str] = field(default_factory=list)
     message: str = ""
     note: str = ""
@@ -92,6 +96,7 @@ class KycAiDecision:
             "extractedIdNumber": self.extracted_id_number,
             "nameOnDocument": self.name_on_document,
             "dateOfBirth": self.date_of_birth,
+            "dateOfBirthPrecision": self.date_of_birth_precision,
             "reasons": self.reasons,
             "checkedAt": self.checked_at,
         }
@@ -128,9 +133,48 @@ def id_format_ok(document_type: str, id_number: str) -> bool:
     return False
 
 
+_YEAR_ONLY_BIRTH = re.compile(
+    r"^(?:(?:year\s+of\s+birth|birth\s+year|y\.?\s*o\.?\s*b\.?|dob|d\.?\s*o\.?\s*b\.?|date\s+of\s+birth)\s*[:\-]?\s*)?(19\d{2}|20\d{2})$",
+    re.IGNORECASE,
+)
+
+
+def year_only_birth(value: str) -> str:
+    """A printed year of birth, without a day or month."""
+    raw = " ".join((value or "").replace(",", " ").split())
+    match = _YEAR_ONLY_BIRTH.fullmatch(raw)
+    if not match:
+        return ""
+    year = int(match.group(1))
+    if 1900 <= year <= date.today().year:
+        return str(year)
+    return ""
+
+
+def birth_year(value: str) -> str:
+    """The four-digit year from a year-of-birth field or a full printed date."""
+    year = year_only_birth(value)
+    if year:
+        return year
+    parsed = parse_date_of_birth(value) if (value or "").strip() else ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", parsed):
+        return parsed[:4]
+    if re.fullmatch(r"\d{4}", parsed):
+        return parsed
+    return ""
+
+
+def resolve_date_of_birth(printed: str, structured: str) -> tuple[str, str]:
+    """Return the year of birth. A full printed date is reduced to its year."""
+    year = birth_year(printed) or birth_year(structured)
+    if year:
+        return year, "year"
+    return "", ""
+
+
 def parse_date_of_birth(value: str) -> str:
     raw = re.sub(
-        r"^(dob|date of birth|d\.o\.b)\s*[:\-]?\s*",
+        r"^(?:dob|date of birth|d\.?\s*o\.?\s*b\.?|year of birth|birth year|y\.?\s*o\.?\s*b\.?)\s*[:\-]?\s*",
         "",
         (value or "").strip(),
         flags=re.IGNORECASE,
@@ -249,7 +293,8 @@ def decide_kyc_auto_verification(
     if document_type == "DRIVING_LICENSE":
         name_on_document = driving_licence_holder_name(name_on_document)
     raw_dob = str(model.get("dateOfBirth") or "").strip()
-    date_of_birth = parse_date_of_birth(raw_dob) or raw_dob
+    printed_dob = str(model.get("dateOfBirthText") or "").strip()
+    date_of_birth, date_precision = resolve_date_of_birth(printed_dob, raw_dob)
     note = str(model.get("reason") or "").strip()[:240]
 
     reasons: list[str] = []
@@ -275,8 +320,8 @@ def decide_kyc_auto_verification(
             reasons.append("The name could not be read from the document")
         elif _name_tokens(candidate_name) and not names_loosely_match(candidate_name, name_on_document):
             reasons.append("The name on the document does not match the student profile")
-        if not parse_date_of_birth(raw_dob):
-            reasons.append("The date of birth could not be read from the document")
+        if not date_of_birth:
+            reasons.append("The year of birth could not be read from the document")
 
     auto_verified = identified and not reasons
     checked_at = datetime.now(timezone.utc).isoformat()
@@ -287,6 +332,7 @@ def decide_kyc_auto_verification(
         extracted_id_number=extracted,
         name_on_document=name_on_document,
         date_of_birth=date_of_birth,
+        date_of_birth_precision=date_precision,
         reasons=reasons,
         message=_student_message(auto_verified, document_type, reasons),
         note=note,
@@ -451,7 +497,7 @@ async def _classify_document_image(content_part: dict) -> dict:
                 "content": [
                     {
                         "type": "text",
-                        "text": "Identify this uploaded identity document and extract the name, document number, and date of birth.",
+                        "text": "Identify this uploaded identity document and extract the name, document number, and year of birth.",
                     },
                     content_part,
                 ],

@@ -268,6 +268,7 @@ export type CandidateKycDetail = {
     idNumber?: string;
     nameOnDocument?: string;
     dateOfBirth?: string;
+    dateOfBirthPrecision?: string;
     submittedAt?: string;
     aiVerification?: {
       outcome?: 'VERIFIED' | 'MANUAL_REVIEW';
@@ -276,6 +277,7 @@ export type CandidateKycDetail = {
       extractedIdNumber?: string;
       nameOnDocument?: string;
       dateOfBirth?: string;
+      dateOfBirthPrecision?: string;
       reasons?: string[];
       note?: string;
       checkedAt?: string;
@@ -679,7 +681,14 @@ export const candidatesApi = {
       expiresInDays?: number;
     },
   ) =>
-    apiFetch<{ signupUrl: string; inviteToken: string; email: string; expiresAt: string }>(
+    apiFetch<{
+      signupUrl: string;
+      inviteToken: string;
+      email: string;
+      expiresAt: string;
+      emailSent?: boolean;
+      emailNotice?: string;
+    }>(
       '/candidates/registration-invites',
       { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) },
     ),
@@ -727,6 +736,7 @@ export const candidatesApi = {
         name: string;
         idNumber: string;
         dateOfBirth: string;
+        dateOfBirthPrecision?: string;
       };
     }>('/candidates/me/kyc', {
       method: 'POST',

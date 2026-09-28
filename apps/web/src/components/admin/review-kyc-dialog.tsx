@@ -7,6 +7,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { candidatesApi } from '@/lib/api';
+import { kycBirthDateDisplay } from '@/lib/kyc-birth-date';
 import { toast } from '@/hooks/use-toast';
 import { UserCheck, Eye, Loader2 } from 'lucide-react';
 
@@ -111,8 +112,11 @@ export function ReviewKycDialog({ accessToken, candidate, open, onOpenChange }: 
   const profile = data?.profileData ?? {};
   const docType = profile.documentType ?? doc?.type;
   const idNumber = profile.idNumber;
-  const dateOfBirth = profile.dateOfBirth;
   const aiReview = profile.aiVerification;
+  const birthDate = kycBirthDateDisplay(
+    profile.dateOfBirth,
+    profile.dateOfBirthPrecision ?? aiReview?.dateOfBirthPrecision,
+  );
   const aiReasons = aiReview?.reasons?.filter(Boolean) ?? [];
   const extractedId = aiReview?.extractedIdNumber?.trim();
   const showExtractedId = Boolean(extractedId && compactId(extractedId) !== compactId(idNumber));
@@ -179,14 +183,12 @@ export function ReviewKycDialog({ accessToken, candidate, open, onOpenChange }: 
                   <dd className="mt-0.5 font-mono font-medium">{extractedId}</dd>
                 </div>
               )}
-              {dateOfBirth && (
+              {birthDate && (
                 <div>
-                  <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Date of birth</dt>
-                  <dd className="mt-0.5 font-medium">
-                    {/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
-                      ? `${dateOfBirth.slice(8, 10)}/${dateOfBirth.slice(5, 7)}/${dateOfBirth.slice(0, 4)}`
-                      : dateOfBirth}
-                  </dd>
+                  <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    {birthDate.label}
+                  </dt>
+                  <dd className="mt-0.5 font-medium">{birthDate.text}</dd>
                 </div>
               )}
               {aiReview?.nameOnDocument && (

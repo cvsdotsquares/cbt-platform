@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { candidatesApi } from '@/lib/api';
+import { kycBirthDateDisplay } from '@/lib/kyc-birth-date';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { ChevronDown, IdCard, Loader2 } from 'lucide-react';
@@ -16,6 +17,7 @@ export type KycExtractedDocument = {
   name?: string;
   idNumber?: string;
   dateOfBirth?: string;
+  dateOfBirthPrecision?: string;
   reviewMessage?: string;
 };
 
@@ -43,13 +45,6 @@ const DOCUMENT_LABELS: Record<string, string> = {
 function documentTypeLabel(type?: string) {
   if (!type) return 'Not readable';
   return DOCUMENT_LABELS[type] ?? type.replace(/_/g, ' ');
-}
-
-function formatDateOfBirth(value?: string) {
-  if (!value?.trim()) return 'Not readable';
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
-  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
-  return value.trim();
 }
 
 function displayValue(value?: string) {
@@ -113,6 +108,7 @@ export function KycSubmitCard({ accessToken, kycStatus, kycDocument }: KycSubmit
 
   const canSubmit = kycStatus === 'NOT_SUBMITTED' || kycStatus === 'REJECTED';
   const details = extracted ?? kycDocument ?? null;
+  const birthDate = kycBirthDateDisplay(details?.dateOfBirth, details?.dateOfBirthPrecision);
   const showDetails = Boolean(details && (extracted || kycStatus !== 'NOT_SUBMITTED'));
   const showBody = expanded || submitMutation.isPending;
 
@@ -167,8 +163,10 @@ export function KycSubmitCard({ accessToken, kycStatus, kycDocument }: KycSubmit
               <dd className="mt-0.5 font-mono font-medium">{displayValue(details.idNumber)}</dd>
             </div>
             <div>
-              <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Date of birth</dt>
-              <dd className="mt-0.5 font-medium">{formatDateOfBirth(details.dateOfBirth)}</dd>
+              <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                {birthDate?.label ?? 'Year of birth'}
+              </dt>
+              <dd className="mt-0.5 font-medium">{birthDate?.text ?? 'Not readable'}</dd>
             </div>
           </dl>
         )}

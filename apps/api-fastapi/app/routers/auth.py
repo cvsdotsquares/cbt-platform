@@ -34,7 +34,11 @@ from app.schemas.auth import (
     AuthUserResponse,
 )
 from app.services.registration_invite import (
+    EMAIL_USED_TWICE,
     consume_invite,
+    count_active_invites,
+    count_email_accounts,
+    email_has_room,
     find_active_invite,
     normalize_invite_email,
     validate_invite_token,
@@ -51,7 +55,7 @@ async def _fetch_user_for_login(
     db: AsyncSession,
     email: str,
     tenant_id: str | None = None,
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
     params: dict[str, str] = {"email": email}
     tenant_clause = ""
     if tenant_id:
@@ -67,13 +71,11 @@ async def _fetch_user_for_login(
             WHERE LOWER(u.email) = :email
               AND u.is_active = TRUE
               {tenant_clause}
-            LIMIT 1
             """
         ),
         params,
     )
-    row = result.mappings().first()
-    return dict(row) if row else None
+    return [dict(row) for row in result.mappings()]
 
 
 async def _fetch_role_names(db: AsyncSession, user_id: str) -> list[str]:
@@ -172,20 +174,19 @@ async def login(
                 detail="Invalid tenant ID",
             )
 
-    user = await _fetch_user_for_login(db, email, tenant_id)
+    matches = await _fetch_user_for_login(db, email, tenant_id)
+    user = None
+    for row in matches:
+        password_ok = await asyncio.to_thread(
+            verify_password,
+            body.password,
+            row["password_hash"],
+        )
+        if password_ok:
+            user = row
+            break
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-        )
-
-    password_ok = await asyncio.to_thread(
-        verify_password,
-        body.password,
-        user["password_hash"],
-    )
-    if not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -328,19 +329,12 @@ async def register(
     # 2. Check duplicate email
     # --------------------------------------------------------
 
-    result = await db.execute(
-        select(User).where(
-            User.email == email,
-            User.tenant_id == tenant.id,
-        )
-    )
-
-    existing_user = result.scalar_one_or_none()
-
-    if existing_user:
+    accounts = await count_email_accounts(db, str(tenant.id), email)
+    invites = await count_active_invites(db, str(tenant.id), email)
+    if not email_has_room(accounts, invites, consuming_invite=bool(invite_code)):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="User with this email already exists",
+            detail=EMAIL_USED_TWICE,
         )
 
     if invite_code:

@@ -58,6 +58,7 @@ type CandidateDashboard = {
       name?: string;
       idNumber?: string;
       dateOfBirth?: string;
+      dateOfBirthPrecision?: string;
       reviewMessage?: string;
     } | null;
   };

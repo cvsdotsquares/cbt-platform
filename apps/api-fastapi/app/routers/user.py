@@ -20,6 +20,12 @@ from app.core.security import (
 )
 from app.models.user import User
 from app.models.user_role import UserRole
+from app.services.registration_invite import (
+    EMAIL_USED_TWICE,
+    count_active_invites,
+    count_email_accounts,
+    email_has_room,
+)
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -491,12 +497,10 @@ async def create_user(
     tenant_id = _tenant_id(current_user)
     email = body.email.strip().lower()
 
-    dup = await db.execute(
-        text("SELECT id FROM users WHERE email = :email AND tenant_id = :tenant_id"),
-        {"email": email, "tenant_id": tenant_id},
-    )
-    if dup.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Email already registered")
+    accounts = await count_email_accounts(db, tenant_id, email)
+    invites = await count_active_invites(db, tenant_id, email)
+    if not email_has_room(accounts, invites):
+        raise HTTPException(status_code=409, detail=EMAIL_USED_TWICE)
 
     role_ids = (body.role_ids or [])[:1]
     role_name: str | None = None
@@ -608,17 +612,12 @@ async def update_user(
     if body.email is not None:
         email = body.email.strip().lower()
         if email != row["email"]:
-            dup = await db.execute(
-                text(
-                    """
-                    SELECT id FROM users
-                    WHERE email = :email AND tenant_id = :tenant_id AND id != :user_id
-                    """
-                ),
-                {"email": email, "tenant_id": tenant_id, "user_id": user_id},
+            accounts = await count_email_accounts(
+                db, tenant_id, email, exclude_user_id=str(user_id)
             )
-            if dup.scalar_one_or_none():
-                raise HTTPException(status_code=409, detail="Email already in use")
+            invites = await count_active_invites(db, tenant_id, email)
+            if not email_has_room(accounts, invites):
+                raise HTTPException(status_code=409, detail=EMAIL_USED_TWICE)
 
     now = datetime.now(timezone.utc)
     user_updates: list[str] = ["updated_at = :now"]
