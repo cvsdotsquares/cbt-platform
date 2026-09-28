@@ -35,6 +35,7 @@ type Batch = {
   academicYear: string;
   academicClass: { id: string; name: string; level: number };
   _count: { enrollments: number };
+  teacherAssignments?: { subject: { id: string; name: string } }[];
 };
 
 type BatchForm = { name: string; academicYear: string; academicClassId: string };
@@ -255,13 +256,21 @@ export default function BatchesPage() {
   }, [batches, search]);
 
   const selectedBatchMeta = (batches ?? []).find((b) => b.id === selectedBatch);
-  const progressStats = useMemo(() => calcProgress(progress ?? []), [progress]);
+  const assignedSubjectIds = useMemo(() => {
+    if (!teacherPortal) return null;
+    return new Set((selectedBatchMeta?.teacherAssignments ?? []).map((a) => a.subject.id));
+  }, [teacherPortal, selectedBatchMeta]);
+  const visibleProgress = useMemo(() => {
+    const rows = progress ?? [];
+    if (!assignedSubjectIds) return rows;
+    return rows.filter((row) => assignedSubjectIds.has(row.subject.id));
+  }, [progress, assignedSubjectIds]);
+  const progressStats = useMemo(() => calcProgress(visibleProgress), [visibleProgress]);
 
   const activeSubject = useMemo(() => {
-    const subjects = progress ?? [];
-    if (!subjects.length) return null;
-    return subjects.find((s) => s.subject.id === selectedSubjectId) ?? subjects[0];
-  }, [progress, selectedSubjectId]);
+    if (!visibleProgress.length) return null;
+    return visibleProgress.find((s) => s.subject.id === selectedSubjectId) ?? visibleProgress[0];
+  }, [visibleProgress, selectedSubjectId]);
 
   useEffect(() => {
     if (batchFromQuery && batches?.some((b) => b.id === batchFromQuery)) {
@@ -274,24 +283,12 @@ export default function BatchesPage() {
   }, [batches, selectedBatch, batchFromQuery]);
 
   useEffect(() => {
-    if (!accessToken || !selectedBatch || !enrollCandidateId) return;
-    let cancelled = false;
-    batchesApi
-      .nextRollNumber(accessToken, selectedBatch)
-      .then(({ rollNumber }) => {
-        if (!cancelled) setEnrollRoll((prev) => prev || rollNumber);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken, selectedBatch, enrollCandidateId]);
-
-  useEffect(() => {
-    if (progress?.length && !selectedSubjectId) {
-      setSelectedSubjectId(progress[0].subject.id);
+    if (!visibleProgress.length) return;
+    const stillVisible = visibleProgress.some((row) => row.subject.id === selectedSubjectId);
+    if (!selectedSubjectId || !stillVisible) {
+      setSelectedSubjectId(visibleProgress[0].subject.id);
     }
-  }, [progress, selectedSubjectId]);
+  }, [visibleProgress, selectedSubjectId]);
 
   useEffect(() => {
     setSelectedSubjectId(null);
@@ -462,7 +459,7 @@ export default function BatchesPage() {
             New batch
           </Button>
         )}
-        {can(Permission.MATERIAL_READ) && !teacherPortal && (
+        {(can(Permission.MATERIAL_UPLOAD) || (!teacherPortal && can(Permission.MATERIAL_READ))) && (
           <Button variant="outline" asChild>
             <Link href="/dashboard/materials">
               <Upload className="mr-2 h-4 w-4" /> Books
@@ -585,7 +582,7 @@ export default function BatchesPage() {
                     {progressStats.total > 0 && (
                       <div className="mt-3 max-w-md">
                         <div className="mb-1.5 flex justify-between text-xs text-muted-foreground">
-                          <span>Overall syllabus coverage</span>
+                          <span>{teacherPortal ? 'Your subject coverage' : 'Overall syllabus coverage'}</span>
                           <span>{progressStats.completed} / {progressStats.total} chapters</span>
                         </div>
                         <div className="h-2 overflow-hidden rounded-full bg-muted">
@@ -673,7 +670,7 @@ export default function BatchesPage() {
                           ))}
                         </select>
                         <Input
-                          placeholder="Roll no."
+                          placeholder="Auto from 1"
                           value={enrollRoll}
                           onChange={(e) => setEnrollRoll(e.target.value)}
                         />
@@ -823,15 +820,23 @@ export default function BatchesPage() {
                 <div className="space-y-4">
                   {progressLoading ? (
                     <TableSkeleton rows={6} />
-                  ) : !(progress ?? []).length ? (
+                  ) : !visibleProgress.length ? (
                     <Card className="surface-card">
                       <EmptyState
                         icon={BookOpen}
-                        title="No books for this class yet"
+                        title={
+                          teacherPortal && !(assignedSubjectIds?.size)
+                            ? 'No subject assigned to you'
+                            : teacherPortal
+                              ? 'No chapters for your subject yet'
+                              : 'No books for this class yet'
+                        }
                         description={
-                          teacherPortal
-                            ? 'Ask your admin to upload NCERT books. Chapters appear here after indexing.'
-                            : 'Upload NCERT books for this class. Chapters appear here after indexing.'
+                          teacherPortal && !(assignedSubjectIds?.size)
+                            ? 'You can mark chapter progress only for the subject an admin assigned you on this class.'
+                            : teacherPortal
+                              ? 'Ask your admin to upload NCERT books for your assigned subject. Chapters appear here after indexing.'
+                              : 'Upload NCERT books for this class. Chapters appear here after indexing.'
                         }
                       />
                       {!teacherPortal && (
@@ -850,7 +855,7 @@ export default function BatchesPage() {
                   ) : (
                     <>
                       <div className="flex flex-wrap gap-2">
-                        {(progress ?? []).map((sp) => {
+                        {visibleProgress.map((sp) => {
                           const subjProgress = calcProgress([sp]);
                           const isActive = activeSubject?.subject.id === sp.subject.id;
                           return (

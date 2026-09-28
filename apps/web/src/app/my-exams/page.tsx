@@ -22,6 +22,7 @@ import { AnswerReviewDialog } from '@/components/results/answer-review-dialog';
 import type { CertificateData } from '@/lib/certificate';
 import { toast } from '@/hooks/use-toast';
 import { getExamStatus, formatCountdown } from '@/lib/exam-status';
+import { kycAllowsExam, kycExamBlockMessage } from '@/lib/kyc-exam';
 import { DEFAULT_EXAM_TIMEZONE } from '@cbt/shared';
 import { formatExamTimeRange } from '@/lib/exam-dates';
 import { formatRankLabel } from '@/lib/rank';
@@ -52,6 +53,13 @@ type CandidateDashboard = {
     kycStatus: string;
     email: string;
     fullName: string;
+    kycDocument?: {
+      documentType?: string;
+      name?: string;
+      idNumber?: string;
+      dateOfBirth?: string;
+      reviewMessage?: string;
+    } | null;
   };
   stats: {
     totalExams: number;
@@ -383,11 +391,24 @@ export default function MyExamsPage() {
 
             {tab === 'exams' && (
               <section className="space-y-3">
+                {profile && !kycAllowsExam(profile.kycStatus) && (
+                  <Card className="border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/20">
+                    <CardContent className="flex items-start gap-3 p-4 text-sm text-amber-800 dark:text-amber-200">
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <p>{kycExamBlockMessage(profile.kycStatus)}</p>
+                    </CardContent>
+                  </Card>
+                )}
                 {examsLoading ? <TableSkeleton rows={3} cols={1} /> : (
                   <>
                     {filteredExams.map((reg) => {
                       void now;
                       const status = getExamStatus(reg);
+                      const kycReady = kycAllowsExam(profile?.kycStatus);
+                      const startBlocked = status.actionDisabled || !kycReady;
+                      const startLabel = profile && !kycReady && !status.actionDisabled
+                        ? 'KYC required'
+                        : status.actionLabel;
                       const tz = reg.exam.timezone || DEFAULT_EXAM_TIMEZONE;
                       const countdown = status.phase === 'upcoming'
                         ? formatCountdown(new Date(reg.exam.startTime).getTime())
@@ -449,11 +470,12 @@ export default function MyExamsPage() {
                               </Button>
                               <Button
                                 onClick={() => router.push(`/exam/instructions/${reg.examId}`)}
-                                disabled={status.actionDisabled}
-                                variant={status.actionDisabled ? 'secondary' : 'default'}
-                                className={status.phase === 'available' || status.phase === 'in_progress' ? 'gradient-primary border-0' : ''}
+                                disabled={startBlocked}
+                                variant={startBlocked ? 'secondary' : 'default'}
+                                className={!startBlocked && (status.phase === 'available' || status.phase === 'in_progress' || status.phase === 'retake') ? 'gradient-primary border-0' : ''}
                               >
-                                <Play className="mr-2 h-4 w-4" /> {status.actionLabel}
+                                <Play className="mr-2 h-4 w-4" />
+                                {startLabel}
                               </Button>
                             </div>
                           </CardContent>
@@ -897,7 +919,11 @@ export default function MyExamsPage() {
 
           <aside className="space-y-4">
             {accessToken && profile && (
-              <KycSubmitCard accessToken={accessToken} kycStatus={profile.kycStatus} />
+              <KycSubmitCard
+                accessToken={accessToken}
+                kycStatus={profile.kycStatus}
+                kycDocument={profile.kycDocument}
+              />
             )}
             <Card className="surface-card">
               <CardHeader className="pb-3">

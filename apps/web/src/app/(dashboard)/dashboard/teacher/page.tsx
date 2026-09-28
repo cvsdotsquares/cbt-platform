@@ -10,13 +10,15 @@ import { StatCard } from '@/components/layout/stat-card';
 import { TableSkeleton } from '@/components/ui/skeleton';
 import { batchesApi, examsApi, learningApi, type ExamListItem } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
+import { usePermissions } from '@/hooks/use-permissions';
+import { Permission } from '@cbt/shared';
 import { useAuthStore } from '@/stores/auth-store';
 import { formatExamDateTime } from '@/lib/exam-dates';
 import { cn } from '@/lib/utils';
 import type { LucideIcon } from 'lucide-react';
 import {
   ArrowRight, Award, BookOpen, Calendar, CheckCircle2, ChevronRight, ClipboardList,
-  FileText, GraduationCap, School, Sparkles, TrendingUp, Users,
+  FileText, GraduationCap, School, Sparkles, TrendingUp, Upload, Users,
 } from 'lucide-react';
 
 type TeacherBatch = {
@@ -113,7 +115,20 @@ function isClassTest(exam: ExamListItem) {
 export default function TeacherPage() {
   const { accessToken } = useRequireAuth(true);
   const { user } = useAuthStore();
+  const { can } = usePermissions();
   const greeting = getGreeting();
+  const actions = can(Permission.MATERIAL_UPLOAD)
+    ? [
+        {
+          label: 'NCERT Books',
+          desc: 'Upload books for your classes',
+          href: '/dashboard/materials',
+          icon: Upload,
+          accent: 'from-indigo-500/15 to-blue-500/5 text-indigo-600',
+        },
+        ...quickActions,
+      ]
+    : quickActions;
 
   const { data: batches, isLoading: batchesLoading } = useQuery({
     queryKey: ['batches'],
@@ -382,7 +397,7 @@ export default function TeacherPage() {
           <h2 className="text-base font-semibold">Quick actions</h2>
         </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {quickActions.map((action) => {
+          {actions.map((action) => {
             const Icon = action.icon;
             return (
               <Link

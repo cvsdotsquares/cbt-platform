@@ -140,7 +140,7 @@ export function CreateCandidateDialog({ accessToken, batches = [], classes = [] 
             </div>
             <div>
               <Label>Roll number (optional)</Label>
-              <Input value={form.rollNumber} onChange={(e) => setForm({ ...form, rollNumber: e.target.value })} />
+              <Input value={form.rollNumber} onChange={(e) => setForm({ ...form, rollNumber: e.target.value })} placeholder="Auto from 1 by name" />
             </div>
           </div>
         </div>

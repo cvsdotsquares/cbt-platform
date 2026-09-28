@@ -112,6 +112,8 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   });
 }
 
+export const maxDuration = 60;
+
 type RouteContext = { params: Promise<{ path: string[] }> };
 
 export async function GET(req: NextRequest, context: RouteContext) {

@@ -256,10 +256,33 @@ async def _exam_access_window(db: AsyncSession, exam_id: str) -> dict:
     return dict(ex)
 
 
+_KYC_BLOCK_MESSAGES = {
+    "PENDING": "Your KYC is under review. You can take this test after it is verified.",
+    "REJECTED": "Your KYC was rejected. Submit updated documents and wait for verification before taking this test.",
+    "NOT_SUBMITTED": "Submit your KYC and wait until it is verified before you can take this test.",
+}
+
+
+async def _require_verified_kyc(db: AsyncSession, candidate_id: str) -> None:
+    row = await db.execute(
+        text("SELECT kyc_status FROM candidates WHERE id::text = :candidate_id"),
+        {"candidate_id": str(candidate_id)},
+    )
+    status = row.scalar_one_or_none()
+    if status == "VERIFIED":
+        return
+    detail = _KYC_BLOCK_MESSAGES.get(
+        status or "NOT_SUBMITTED",
+        "Your KYC must be verified before you can take this test.",
+    )
+    raise HTTPException(status_code=403, detail=detail)
+
+
 async def start_session(db: AsyncSession, exam_id: str, candidate_id: str) -> dict:
     exam_id = str(exam_id)
     candidate_id = str(candidate_id)
 
+    await _require_verified_kyc(db, candidate_id)
     await reconcile_candidate_sessions(db, candidate_id)
 
     existing = await db.execute(

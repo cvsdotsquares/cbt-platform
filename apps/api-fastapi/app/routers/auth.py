@@ -39,6 +39,7 @@ from app.services.registration_invite import (
     normalize_invite_email,
     validate_invite_token,
 )
+from app.services.roll_numbers import sync_batch_roll_numbers
 
 router = APIRouter(
     prefix="/auth",
@@ -462,6 +463,7 @@ async def register(
                 "now": new_user.created_at,
             },
         )
+        await sync_batch_roll_numbers(db, invite_batch_id)
 
     # --------------------------------------------------------
     # 8. Commit
@@ -585,6 +587,24 @@ async def logout(
     return {
         "message": "Successfully logged out"
     }
+
+
+@router.get("/effective-permissions")
+async def effective_permissions(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.core.security import loaded_role_names
+    from app.services.role_permission_matrix import effective_permissions_for_user
+
+    roles = loaded_role_names(current_user)
+    permissions, customized = await effective_permissions_for_user(
+        db,
+        str(current_user.tenant_id) if current_user.tenant_id else None,
+        str(current_user.id) if current_user.id else None,
+        roles,
+    )
+    return {"permissions": permissions, "customized": customized}
 
 
 # ============================================================

@@ -115,7 +115,7 @@ export default function AiStudioPage() {
             <p className="text-sm text-muted-foreground">
               {aiStatus.openaiConfigured
                 ? 'Questions are generated live by GPT based on your topic, difficulty, and type.'
-                : 'Add OPENAI_API_KEY to apps/api/.env or the root .env, then restart the API server to enable real AI generation.'}
+                : 'Add OPENAI_API_KEY to apps/api-fastapi/.env, then create the test again.'}
             </p>
           </div>
         </div>

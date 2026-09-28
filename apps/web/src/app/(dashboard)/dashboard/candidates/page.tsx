@@ -26,7 +26,7 @@ import { toast } from '@/hooks/use-toast';
 import { useDebounce } from '@/hooks/use-debounce';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import { Search, Users, CheckCircle2, Clock, UserCheck, Pencil, Trash2, GraduationCap, Eye } from 'lucide-react';
+import { ChevronDown, Search, Users, CheckCircle2, Clock, UserCheck, Pencil, Trash2, GraduationCap, Eye } from 'lucide-react';
 import { ReviewKycDialog, type KycReviewCandidate } from '@/components/admin/review-kyc-dialog';
 import { PaginationControls } from '@/components/layout/pagination';
 import { TableSkeleton } from '@/components/ui/skeleton';
@@ -44,6 +44,7 @@ type CandidateItem = {
   id: string;
   registrationNumber: string;
   kycStatus: string;
+  kycSubmittedAt?: string | null;
   createdAt: string;
   createdBy?: { id: string; name: string; email: string } | null;
   user: { firstName: string; lastName: string; email: string; status: string };
@@ -92,6 +93,31 @@ function classEnrollmentLabel(level: number, name?: string) {
 
 type ClassTab = 'all' | 'unassigned' | string;
 
+function rollRank(student: CandidateItem) {
+  const raw = getEnrollment(student)?.rollNumber ?? '';
+  const digits = String(raw).replace(/\D/g, '');
+  const value = digits ? Number.parseInt(digits, 10) : Number.NaN;
+  return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
+function compareStudents(a: CandidateItem, b: CandidateItem) {
+  const rollDiff = rollRank(a) - rollRank(b);
+  if (rollDiff !== 0) return rollDiff;
+  const nameA = `${a.user.firstName} ${a.user.lastName}`.trim();
+  const nameB = `${b.user.firstName} ${b.user.lastName}`.trim();
+  return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+}
+
+function compareUnassignedStudents(a: CandidateItem, b: CandidateItem) {
+  const aSubmitted = a.kycStatus !== 'NOT_SUBMITTED';
+  const bSubmitted = b.kycStatus !== 'NOT_SUBMITTED';
+  if (aSubmitted !== bSubmitted) return aSubmitted ? -1 : 1;
+  const timeA = Date.parse(a.kycSubmittedAt || '') || 0;
+  const timeB = Date.parse(b.kycSubmittedAt || '') || 0;
+  if (timeA !== timeB) return timeB - timeA;
+  return compareStudents(a, b);
+}
+
 function groupStudentsByClass(
   students: CandidateItem[],
   sortedClasses: { id: string; level: number; name: string }[],
@@ -139,7 +165,7 @@ function groupStudentsByClass(
 
 export default function CandidatesPage() {
   const { accessToken } = useRequireAuth(true);
-  const { can } = usePermissions();
+  const { can, synced } = usePermissions();
   const { user } = useAuthStore();
   const searchParams = useSearchParams();
   const teacherPortal = isTeacherOnly(normalizeRoles(user?.roles));
@@ -152,6 +178,7 @@ export default function CandidatesPage() {
   const [batchFilter, setBatchFilter] = useState('');
   const [editCandidate, setEditCandidate] = useState<EditableCandidate | null>(null);
   const [batchCandidate, setBatchCandidate] = useState<BatchManageCandidate | null>(null);
+  const [collapsedClasses, setCollapsedClasses] = useState<Record<string, boolean>>({});
   const [removeTarget, setRemoveTarget] = useState<CandidateItem | null>(null);
   const [kycReviewCandidate, setKycReviewCandidate] = useState<KycReviewCandidate | null>(null);
   const debouncedSearch = useDebounce(search);
@@ -501,7 +528,13 @@ export default function CandidatesPage() {
       );
     });
 
-  const renderStudentTable = (students: CandidateItem[], showClassColumn: boolean) => (
+  function toggleClassSection(sectionId: string) {
+    setCollapsedClasses((current) => ({ ...current, [sectionId]: !current[sectionId] }));
+  }
+
+  const renderStudentTable = (students: CandidateItem[], showClassColumn: boolean, compare = compareStudents) => {
+    const ordered = [...students].sort(compare);
+    return (
     <ScrollableListPanel maxHeightClass="max-h-[min(480px,55vh)]" className="overflow-x-auto">
     <DataTable>
       <table className="min-w-[880px] w-full">
@@ -516,7 +549,7 @@ export default function CandidatesPage() {
           <DataTableHead>Registered</DataTableHead>
           <DataTableHead>Actions</DataTableHead>
         </DataTableHeader>
-        <tbody>{renderStudentRows(students, showClassColumn)}</tbody>
+        <tbody>{renderStudentRows(ordered, showClassColumn)}</tbody>
       </table>
       {!students.length && (
         <EmptyState
@@ -535,11 +568,11 @@ export default function CandidatesPage() {
       )}
     </DataTable>
     </ScrollableListPanel>
-  );
+    );
+  };
 
   const hasFilters = Boolean(debouncedSearch || batchFilter || classTab !== 'all');
-  const canInviteStudent =
-    can(Permission.CANDIDATE_INVITE) || can(Permission.CANDIDATE_CREATE);
+  const canInviteStudent = synced && can(Permission.CANDIDATE_INVITE);
 
   return (
     <div className="space-y-8">
@@ -699,10 +732,17 @@ export default function CandidatesPage() {
 
       {showGroupedByClass ? (
         <ScrollableListPanel maxHeightClass="max-h-[min(75vh,800px)]" className="space-y-6">
-          {classGroups.map((group) => (
+          {classGroups.map((group) => {
+            const collapsed = Boolean(collapsedClasses[group.classId]);
+            return (
             <Card key={group.classId} className="surface-card overflow-hidden">
-              <CardHeader className="border-b bg-muted/20 pb-4">
-                <div className="flex flex-wrap items-center gap-3">
+              <CardHeader className={cn('bg-muted/20 pb-4', !collapsed && 'border-b')}>
+                <button
+                  type="button"
+                  aria-expanded={!collapsed}
+                  onClick={() => toggleClassSection(group.classId)}
+                  className="flex w-full flex-wrap items-center gap-3 text-left"
+                >
                   <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-sm font-bold text-primary">
                     {group.classLevel}
                   </span>
@@ -715,17 +755,26 @@ export default function CandidatesPage() {
                   <Badge variant="secondary" className="normal-case tracking-normal">
                     Class {group.classLevel}
                   </Badge>
-                </div>
+                  <ChevronDown className={cn('h-5 w-5 shrink-0 text-muted-foreground transition-transform', collapsed && '-rotate-90')} />
+                </button>
               </CardHeader>
+              {!collapsed && (
               <CardContent className="p-0">
                 {renderStudentTable(group.students, false)}
               </CardContent>
+              )}
             </Card>
-          ))}
+            );
+          })}
           {unassignedStudents.length > 0 && (
             <Card className="surface-card overflow-hidden border-amber-500/30">
-              <CardHeader className="border-b border-amber-500/20 bg-amber-500/5 pb-4">
-                <div className="flex flex-wrap items-center gap-3">
+              <CardHeader className={cn('bg-amber-500/5 pb-4', !collapsedClasses.unassigned && 'border-b border-amber-500/20')}>
+                <button
+                  type="button"
+                  aria-expanded={!collapsedClasses.unassigned}
+                  onClick={() => toggleClassSection('unassigned')}
+                  className="flex w-full flex-wrap items-center gap-3 text-left"
+                >
                   <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-sm font-bold text-amber-700">
                     ?
                   </span>
@@ -738,11 +787,14 @@ export default function CandidatesPage() {
                   <Badge variant="outline" className="border-amber-500/40 text-amber-800">
                     {unassignedStudents.length} student{unassignedStudents.length === 1 ? '' : 's'}
                   </Badge>
-                </div>
+                  <ChevronDown className={cn('h-5 w-5 shrink-0 text-muted-foreground transition-transform', collapsedClasses.unassigned && '-rotate-90')} />
+                </button>
               </CardHeader>
+              {!collapsedClasses.unassigned && (
               <CardContent className="p-0">
-                {renderStudentTable(unassignedStudents, false)}
+                {renderStudentTable(unassignedStudents, false, compareUnassignedStudents)}
               </CardContent>
+              )}
             </Card>
           )}
           {!classGroups.length && !unassignedStudents.length && (
@@ -783,7 +835,7 @@ export default function CandidatesPage() {
                 </p>
               </CardHeader>
               <CardContent className="p-0">
-                {renderStudentTable(items, false)}
+                {renderStudentTable(items, false, compareUnassignedStudents)}
               </CardContent>
             </Card>
           )}

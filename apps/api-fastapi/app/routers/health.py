@@ -14,7 +14,7 @@ async def health_check():
     """
     return {
         "status": "ok",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -29,7 +29,7 @@ async def readiness_check(db: AsyncSession = Depends(get_db)):
         return {
             "status": "ready",
             "database": "connected",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
     except Exception as exc:
         raise HTTPException(

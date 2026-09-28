@@ -1,7 +1,6 @@
 'use client';
 
 import { useRef, useState, useMemo, useEffect, type ComponentProps } from 'react';
-import { useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -19,7 +18,6 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth-store';
-import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
 import {
   readMaterialsUploadSession,
   writeMaterialsUploadSession,
@@ -185,8 +183,6 @@ export default function MaterialsPage() {
   const { accessToken } = useRequireAuth(true);
   const { can } = usePermissions();
   const { user } = useAuthStore();
-  const router = useRouter();
-  const teacherPortal = isTeacherOnly(normalizeRoles(user?.roles));
   const canUpload = can(Permission.MATERIAL_UPLOAD);
   const canDelete = can(Permission.MATERIAL_DELETE);
   const queryClient = useQueryClient();
@@ -213,13 +209,6 @@ export default function MaterialsPage() {
     chapterId: '',
     academicSession: '2025-26',
   });
-
-  // Teachers view/download books inside Syllabus — no separate NCERT panel
-  useEffect(() => {
-    if (teacherPortal) router.replace('/dashboard/syllabus');
-  }, [teacherPortal, router]);
-
-  if (teacherPortal) return null;
 
   useEffect(() => {
     if (!user?.id || uploadSessionHydratedRef.current) return;
@@ -592,11 +581,11 @@ export default function MaterialsPage() {
         title="NCERT Books & Notes"
         highlight="Books & Notes"
         description={
-          teacherPortal
-            ? 'View and download NCERT books uploaded for your assigned class and subject.'
-            : 'Upload Class 9–12 NCERT PDFs — complete books or chapter files. Chapters are extracted from your files and power AI class tests.'
+          canUpload
+            ? 'Upload Class 9–12 NCERT PDFs — complete books or chapter files. Chapters are extracted from your files and power AI class tests.'
+            : 'View and download NCERT books uploaded for your classes.'
         }
-        badge={teacherPortal ? 'Teacher · Assigned subjects' : 'NCERT · Classes 9–12'}
+        badge="NCERT · Classes 9–12"
       />
 
       {canUpload && (

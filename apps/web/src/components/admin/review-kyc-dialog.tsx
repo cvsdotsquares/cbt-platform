@@ -30,10 +30,15 @@ const DOCUMENT_LABELS: Record<string, string> = {
   PAN: 'PAN Card',
   PASSPORT: 'Passport',
   DRIVING_LICENSE: 'Driving License',
+  UNKNOWN: 'Unrecognised document',
 };
 
 function documentTypeLabel(type: string) {
   return DOCUMENT_LABELS[type] ?? type.replace(/_/g, ' ');
+}
+
+function compactId(value?: string | null) {
+  return (value || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
 }
 
 function DocumentPreview({ fileUrl, fileName, mimeType }: { fileUrl: string; fileName: string; mimeType: string }) {
@@ -47,7 +52,7 @@ function DocumentPreview({ fileUrl, fileName, mimeType }: { fileUrl: string; fil
       <iframe
         title={fileName}
         src={fileUrl}
-        className="h-[min(420px,50vh)] w-full rounded-lg border border-border/60 bg-muted/20"
+        className="h-[min(320px,42vh)] w-full rounded-lg border border-border/60 bg-muted/20"
       />
     );
   }
@@ -58,7 +63,7 @@ function DocumentPreview({ fileUrl, fileName, mimeType }: { fileUrl: string; fil
       <img
         src={fileUrl}
         alt={fileName}
-        className="max-h-[min(420px,50vh)] w-full rounded-lg border border-border/60 object-contain bg-muted/20"
+        className="max-h-[min(320px,42vh)] w-full rounded-lg border border-border/60 object-contain bg-muted/20"
       />
     );
   }
@@ -106,11 +111,17 @@ export function ReviewKycDialog({ accessToken, candidate, open, onOpenChange }: 
   const profile = data?.profileData ?? {};
   const docType = profile.documentType ?? doc?.type;
   const idNumber = profile.idNumber;
+  const dateOfBirth = profile.dateOfBirth;
+  const aiReview = profile.aiVerification;
+  const aiReasons = aiReview?.reasons?.filter(Boolean) ?? [];
+  const extractedId = aiReview?.extractedIdNumber?.trim();
+  const showExtractedId = Boolean(extractedId && compactId(extractedId) !== compactId(idNumber));
+  const canReview = data?.kycStatus?.toUpperCase() === 'PENDING';
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto sm:max-w-xl">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[90vh] max-w-lg flex-col gap-0 overflow-hidden p-0 sm:max-w-xl sm:p-0">
+        <DialogHeader className="shrink-0 px-6 pb-2 pt-6 pr-12">
           <DialogTitle className="flex flex-wrap items-center gap-2">
             <Eye className="h-5 w-5 text-primary" />
             Review KYC
@@ -127,6 +138,7 @@ export function ReviewKycDialog({ accessToken, candidate, open, onOpenChange }: 
           </DialogDescription>
         </DialogHeader>
 
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-2">
         {isLoading && (
           <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
             <Loader2 className="h-5 w-5 animate-spin" />
@@ -159,7 +171,53 @@ export function ReviewKycDialog({ accessToken, candidate, open, onOpenChange }: 
                   <dd className="mt-0.5 font-mono font-medium">{idNumber}</dd>
                 </div>
               )}
+              {showExtractedId && (
+                <div className="sm:col-span-2">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Number read from document
+                  </dt>
+                  <dd className="mt-0.5 font-mono font-medium">{extractedId}</dd>
+                </div>
+              )}
+              {dateOfBirth && (
+                <div>
+                  <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Date of birth</dt>
+                  <dd className="mt-0.5 font-medium">
+                    {/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
+                      ? `${dateOfBirth.slice(8, 10)}/${dateOfBirth.slice(5, 7)}/${dateOfBirth.slice(0, 4)}`
+                      : dateOfBirth}
+                  </dd>
+                </div>
+              )}
+              {aiReview?.nameOnDocument && (
+                <div className="sm:col-span-2">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Name read from document
+                  </dt>
+                  <dd className="mt-0.5 font-medium">{aiReview.nameOnDocument}</dd>
+                </div>
+              )}
             </dl>
+
+            {aiReview?.outcome === 'MANUAL_REVIEW' && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+                <p className="font-medium">Automatic check needs your review</p>
+                {aiReasons.length > 0 ? (
+                  <ul className="mt-2 list-disc space-y-1 pl-4 text-muted-foreground">
+                    {aiReasons.map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-muted-foreground">
+                    The document was not confirmed automatically.
+                  </p>
+                )}
+                {aiReview.note && (
+                  <p className="mt-2 text-muted-foreground">{aiReview.note}</p>
+                )}
+              </div>
+            )}
 
             {doc ? (
               <div className="space-y-2">
@@ -173,9 +231,10 @@ export function ReviewKycDialog({ accessToken, candidate, open, onOpenChange }: 
             )}
           </div>
         )}
+        </div>
 
-        {data?.kycStatus === 'PENDING' && (
-          <DialogFooter className="gap-2 sm:gap-0">
+        {canReview && (
+          <DialogFooter className="shrink-0 gap-2 border-t border-border/60 bg-background px-6 py-4 sm:gap-0">
             <Button
               type="button"
               variant="destructive"

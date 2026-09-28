@@ -182,7 +182,7 @@ export function ManageCandidateBatchDialog({
           <div>
             <Label>Roll number (optional)</Label>
             <Input
-              placeholder="e.g. 12"
+              placeholder="Auto from 1 by name"
               value={rollNumber}
               onChange={(e) => setRollNumber(e.target.value)}
             />

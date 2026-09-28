@@ -290,7 +290,7 @@ export default function SyllabusPage() {
         }
         badge={teacherPortal ? 'Teacher · Assigned subjects' : 'Classes 9–12'}
       >
-        {can(Permission.MATERIAL_UPLOAD) && !teacherPortal && (
+        {can(Permission.MATERIAL_UPLOAD) && (
           <>
             <Button
               variant="outline"
@@ -332,12 +332,12 @@ export default function SyllabusPage() {
             icon={BookOpen}
             title={teacherPortal ? 'No syllabus for your subjects yet' : 'No syllabus extracted yet'}
             description={
-              teacherPortal
+              teacherPortal && !can(Permission.MATERIAL_UPLOAD)
                 ? 'Ask your admin to upload NCERT books for your assigned class and subject. Chapters will appear here once indexed.'
                 : 'Upload NCERT Class 9–12 PDFs on NCERT Books. Chapters and topics are detected automatically from your files.'
             }
           />
-          {!teacherPortal && (
+          {(can(Permission.MATERIAL_UPLOAD) || !teacherPortal) && (
             <div className="flex justify-center gap-3 pb-8">
               <Button asChild>
                 <Link href="/dashboard/materials">
@@ -635,7 +635,7 @@ export default function SyllabusPage() {
                     icon={Library}
                     title={`No subjects for ${activeClass.name} yet`}
                     description={
-                      teacherPortal
+                      teacherPortal && !can(Permission.MATERIAL_UPLOAD)
                         ? 'No assigned subjects with uploaded books for this class.'
                         : 'Upload books tagged to this class on NCERT Books.'
                     }
@@ -652,7 +652,7 @@ export default function SyllabusPage() {
                 title={`Class ${activeLevel} — no books yet`}
                 description="Upload NCERT PDFs for this class on NCERT Books. Use multi-file upload; English, Maths, and Science are detected from each file name."
               />
-              {can(Permission.MATERIAL_UPLOAD) && !teacherPortal && (
+              {can(Permission.MATERIAL_UPLOAD) && (
                 <div className="flex justify-center pb-8">
                   <Button asChild>
                     <Link href="/dashboard/materials">

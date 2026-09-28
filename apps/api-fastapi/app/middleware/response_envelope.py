@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import html
 import json
 from uuid import uuid4
 
@@ -54,7 +55,7 @@ class ResponseEnvelopeMiddleware:
                     or _header_value(response_headers, b"x-request-id")
                     or str(uuid4())
                 )
-                now_iso = datetime.now(timezone.utc).isoformat()
+                now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
                 content_type = _header_value(response_headers, b"content-type") or ""
                 if "application/json" not in content_type.lower():
@@ -100,6 +101,7 @@ class ResponseEnvelopeMiddleware:
                             "timestamp": now_iso,
                             "requestId": request_id,
                         }
+                    payload = envelope
                     new_body = json.dumps(envelope).encode("utf-8")
                 elif status_code >= 400:
                     if isinstance(data, dict):
@@ -118,6 +120,7 @@ class ResponseEnvelopeMiddleware:
                             "error": str(status_code),
                             "requestId": request_id,
                         }
+                    payload = error_payload
                     new_body = json.dumps(error_payload).encode("utf-8")
                 else:
                     await send(
@@ -131,7 +134,13 @@ class ResponseEnvelopeMiddleware:
                     return
 
                 headers = MutableHeaders(raw=response_headers)
-                headers["content-type"] = "application/json"
+                if _browser_document_request(scope):
+                    # Chrome's built-in JSON viewer often paints a blank page.
+                    # Address-bar visits get a readable HTML view; API clients still get JSON.
+                    new_body = _json_html_page(payload).encode("utf-8")
+                    headers["content-type"] = "text/html; charset=utf-8"
+                else:
+                    headers["content-type"] = "application/json"
                 headers["content-length"] = str(len(new_body))
                 headers["X-Request-ID"] = request_id
 
@@ -155,3 +164,33 @@ def _header_value(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None
         if key.lower() == name:
             return value.decode("latin-1")
     return None
+
+
+def _scope_header(scope: Scope, name: bytes) -> str:
+    for key, value in scope.get("headers") or []:
+        if key.lower() == name:
+            return value.decode("latin-1")
+    return ""
+
+
+def _browser_document_request(scope: Scope) -> bool:
+    """True for an address-bar visit. fetch() and the Next.js proxy are not document navigations."""
+    if _scope_header(scope, b"sec-fetch-dest").strip().lower() == "document":
+        return True
+    if _scope_header(scope, b"sec-fetch-mode").strip().lower() == "navigate":
+        return True
+    first = _scope_header(scope, b"accept").split(",", 1)[0].split(";", 1)[0].strip().lower()
+    return first == "text/html"
+
+
+def _json_html_page(payload: object) -> str:
+    pretty = html.escape(json.dumps(payload, indent=2))
+    return (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        "<title>CBT Platform API</title>"
+        "<style>"
+        "html,body{margin:0;background:#111;color:#e8eaed}"
+        "pre{margin:0;padding:16px;font:14px/1.5 Consolas,monospace;white-space:pre-wrap}"
+        "</style></head><body><pre>"
+        f"{pretty}</pre></body></html>"
+    )
