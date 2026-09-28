@@ -128,6 +128,24 @@ async def _unique_title(db: AsyncSession, tenant_id: str, title: str) -> str:
         suffix += 1
 
 
+async def _completed_chapter_ids(db: AsyncSession, batch_id: str) -> set[str]:
+    """Chapter-level rows the teacher marked Done for this batch."""
+    rows = await db.execute(
+        text(
+            """
+            SELECT chapter_id::text
+            FROM syllabus_progress
+            WHERE batch_id::text = :batch_id
+              AND status = 'COMPLETED'
+              AND chapter_id IS NOT NULL
+              AND topic_id IS NULL
+            """
+        ),
+        {"batch_id": str(batch_id)},
+    )
+    return {row[0] for row in rows.all()}
+
+
 async def _resolve_chapter_ids(
     db: AsyncSession,
     tenant_id: str,
@@ -139,6 +157,7 @@ async def _resolve_chapter_ids(
 ) -> list[str]:
     uploaded = await _uploaded_chapter_ids(db, tenant_id, class_level, subject_id)
     requested = [str(cid) for cid in (chapter_ids_req or []) if cid]
+    completed = await _completed_chapter_ids(db, batch_id) if batch_id else None
 
     if not uploaded and not requested:
         raise HTTPException(
@@ -186,38 +205,29 @@ async def _resolve_chapter_ids(
                 {"ids": requested, "class_level": class_level, "subject_id": str(subject_id)},
             )
             chapter_ids = [row[0] for row in rows.all()]
-        if not chapter_ids:
-            raise HTTPException(
-                status_code=400,
-                detail="Select at least one chapter with uploaded documents for this test.",
-            )
-        return chapter_ids
-
-    if scope == "COMPLETED_ONLY" and batch_id:
-        rows = await db.execute(
-            text(
-                """
-                SELECT chapter_id::text
-                FROM syllabus_progress
-                WHERE batch_id::text = :batch_id
-                  AND status = 'COMPLETED'
-                  AND chapter_id IS NOT NULL
-                """
-            ),
-            {"batch_id": str(batch_id)},
-        )
-        completed = {row[0] for row in rows.all()}
-        if requested:
-            chapter_ids = [cid for cid in requested if cid in uploaded and cid in completed]
-        else:
-            chapter_ids = [cid for cid in completed if cid in uploaded]
-        if not chapter_ids and uploaded:
-            chapter_ids = sorted(uploaded)
+        if completed is not None:
+            chapter_ids = [cid for cid in chapter_ids if cid in completed]
         if not chapter_ids:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "No studied chapters with uploaded documents. Mark chapters on Classes & Batches "
+                    "Select at least one chapter marked Done for this class."
+                    if batch_id
+                    else "Select at least one chapter with uploaded documents for this test."
+                ),
+            )
+        return chapter_ids
+
+    if scope == "COMPLETED_ONLY" and batch_id and completed is not None:
+        if requested:
+            chapter_ids = [cid for cid in requested if cid in uploaded and cid in completed]
+        else:
+            chapter_ids = [cid for cid in completed if cid in uploaded]
+        if not chapter_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No chapters marked Done for this batch. Mark chapters as Done on Classes & Batches "
                     "and ensure matching books are uploaded."
                 ),
             )
@@ -1402,7 +1412,32 @@ async def create_ai_test(
         if not subject_rows:
             raise HTTPException(status_code=400, detail="No subjects configured for this class")
 
-        per_subject = body.questions_per_subject or max(1, (body.question_count or 10) // max(len(subject_rows), 1))
+        resolved_subjects: list[tuple[dict, list[str]]] = []
+        for subject in subject_rows:
+            try:
+                chapter_ids = await _resolve_chapter_ids(
+                    db,
+                    tenant_id,
+                    body.batch_id,
+                    subject["id"],
+                    batch["level"],
+                    None,
+                    "COMPLETED_ONLY",
+                )
+            except HTTPException:
+                continue
+            if chapter_ids:
+                resolved_subjects.append((dict(subject), chapter_ids))
+        if not resolved_subjects:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No chapters marked Done for this batch. Mark chapters as Done on Classes & Batches, "
+                    "then generate the test again."
+                ),
+            )
+
+        per_subject = body.questions_per_subject or max(1, (body.question_count or 10) // max(len(resolved_subjects), 1))
         duration = body.duration_minutes or 90
         code = f"AI-ALL-{int(now.timestamp())}"
         exam_id, section_ids = await _create_exam_shell(
@@ -1418,7 +1453,7 @@ async def create_ai_test(
                 "batchId": body.batch_id,
                 "shuffleQuestions": body.shuffle_questions,
             },
-            [s["name"] for s in subject_rows],
+            [s["name"] for s, _ids in resolved_subjects],
             now,
         )
 
@@ -1426,23 +1461,7 @@ async def create_ai_test(
         context_used = 0
         order_index = 0
         generation_sources: list[str] = []
-        for subject, section_id in zip(subject_rows, section_ids):
-            try:
-                chapter_ids = await _resolve_chapter_ids(
-                    db,
-                    tenant_id,
-                    body.batch_id,
-                    subject["id"],
-                    batch["level"],
-                    body.chapter_ids,
-                    body.syllabus_scope,
-                )
-            except HTTPException as exc:
-                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{subject['name']}: {detail}",
-                ) from exc
+        for (subject, chapter_ids), section_id in zip(resolved_subjects, section_ids):
             chapters = await _load_chapters(db, chapter_ids)
             context_chunks = (
                 await _load_rag_context(db, tenant_id, chapter_ids, body.topic_ids)
