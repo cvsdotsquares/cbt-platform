@@ -1,0 +1,173 @@
+import json
+
+import httpx
+import pytest
+
+from app.core.config import settings
+from app.routers.ai import (
+    _generate_questions,
+    _is_placeholder_reference_answer,
+    _normalize_msq_answer_value,
+    _resolve_chapter_ids,
+)
+
+
+class _Rows:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+
+class _Result:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return _Rows(self._values).all()
+
+
+class _Db:
+    async def execute(self, statement, params):
+        return _Result([("chapter-1",)])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [["a", "c"], '["a", "c"]', "a,c", "a and c", "1,3"],
+)
+def test_normalize_msq_answer_value_accepts_common_provider_formats(value):
+    assert _normalize_msq_answer_value(value) == ["a", "c"]
+
+
+@pytest.mark.anyio
+async def test_generate_questions_without_indexed_context_uses_dummy_questions(monkeypatch):
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+
+    questions, source = await _generate_questions(
+        chapters=[
+            {
+                "id": "chapter-1",
+                "title": "Matter",
+                "subject_name": "Science",
+            }
+        ],
+        count=2,
+        difficulty="MEDIUM",
+        question_types=["MCQ"],
+        context_chunks=[],
+    )
+
+    assert source == "dummy"
+    assert len(questions) == 2
+    assert all(question["type"] == "MCQ" for question in questions)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "question_types",
+    [
+        ["MCQ"],
+        ["MSQ"],
+        ["SUBJECTIVE"],
+        ["CASE_STUDY"],
+        ["MCQ", "MSQ"],
+        ["MCQ", "SUBJECTIVE"],
+        ["MSQ", "CASE_STUDY"],
+        ["MCQ", "MSQ", "SUBJECTIVE"],
+        ["MCQ", "MSQ", "SUBJECTIVE", "CASE_STUDY"],
+    ],
+)
+async def test_generate_questions_supports_every_question_type_combination(monkeypatch, question_types):
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+
+    questions, source = await _generate_questions(
+        chapters=[{"id": "chapter-1", "title": "Matter", "subject_name": "Science"}],
+        count=len(question_types) * 2,
+        difficulty="MEDIUM",
+        question_types=question_types,
+        context_chunks=[],
+    )
+
+    assert source == "dummy"
+    assert [question["type"] for question in questions] == question_types * 2
+
+
+@pytest.mark.anyio
+async def test_configured_ai_without_indexed_context_uses_openai(monkeypatch):
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "configured-for-test")
+
+    open_ended_answer = (
+        "Evaporation is the change of water from liquid to vapor. It drives the water cycle "
+        "by moving moisture into the atmosphere where it condenses and returns as precipitation."
+    )
+
+    async def fake_openai_chat(_payload):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "questions": [
+                                    {
+                                        "title": "Science: Matter",
+                                        "type": "SUBJECTIVE",
+                                        "content": {
+                                            "text": "Explain evaporation and describe its importance in the water cycle."
+                                        },
+                                        "options": {},
+                                        "correct_answer": {
+                                            "value": open_ended_answer,
+                                            "rubric": "Award marks for definition and water-cycle link.",
+                                        },
+                                        "marks": 2,
+                                        "negative_marks": 0,
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        "app.routers.ai._post_openai_chat_completions",
+        fake_openai_chat,
+    )
+
+    questions, source = await _generate_questions(
+        chapters=[{"id": "chapter-1", "title": "Matter", "subject_name": "Science"}],
+        count=1,
+        difficulty="MEDIUM",
+        question_types=["SUBJECTIVE"],
+        context_chunks=[],
+    )
+
+    assert source == "openai"
+    assert len(questions) == 1
+    assert not _is_placeholder_reference_answer(questions[0]["correct_answer"]["value"])
+
+
+@pytest.mark.anyio
+async def test_resolve_requested_chapter_without_indexing(monkeypatch):
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+
+    async def no_uploaded_chapters(*args, **kwargs):
+        return set()
+
+    monkeypatch.setattr("app.routers.ai._uploaded_chapter_ids", no_uploaded_chapters)
+
+    chapter_ids = await _resolve_chapter_ids(
+        _Db(),
+        tenant_id="tenant-1",
+        batch_id=None,
+        subject_id="subject-1",
+        class_level=10,
+        chapter_ids_req=["chapter-1"],
+        syllabus_scope="COMPLETED_ONLY",
+    )
+
+    assert chapter_ids == ["chapter-1"]

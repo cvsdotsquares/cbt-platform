@@ -1,0 +1,112 @@
+# Nginx reverse proxy example — company server (no Docker).
+# Copy to /etc/nginx/sites-available/cbt.conf, adjust domains/ports, enable & reload.
+#
+# Placeholders:
+#   DEV_WEB_HOST / DEV_API_HOST
+#   STAGING_WEB_HOST / STAGING_API_HOST
+#   PROD_WEB_HOST / PROD_API_HOST
+#
+# Upstream ports must match infra/deploy/pm2/ecosystem.config.cjs
+
+upstream cbt_dev_web { server 127.0.0.1:3010; }
+upstream cbt_dev_api { server 127.0.0.1:4010; }
+upstream cbt_staging_web { server 127.0.0.1:3020; }
+upstream cbt_staging_api { server 127.0.0.1:4020; }
+upstream cbt_prod_web { server 127.0.0.1:3030; }
+upstream cbt_prod_api { server 127.0.0.1:4030; }
+
+# ---- DEV ----
+server {
+  listen 80;
+  server_name DEV_WEB_HOST;  # e.g. cbt-dev.yourcompany.com
+
+  location / {
+    proxy_pass http://cbt_dev_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+
+server {
+  listen 80;
+  server_name DEV_API_HOST;  # e.g. cbt-dev-api.yourcompany.com
+
+  location / {
+    proxy_pass http://cbt_dev_api;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+
+# ---- STAGING ----
+server {
+  listen 80;
+  server_name STAGING_WEB_HOST;
+
+  location / {
+    proxy_pass http://cbt_staging_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+
+server {
+  listen 80;
+  server_name STAGING_API_HOST;
+
+  location / {
+    proxy_pass http://cbt_staging_api;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+
+# ---- PRODUCTION ----
+server {
+  listen 80;
+  server_name PROD_WEB_HOST;
+
+  location / {
+    proxy_pass http://cbt_prod_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+
+server {
+  listen 80;
+  server_name PROD_API_HOST;
+
+  location / {
+    proxy_pass http://cbt_prod_api;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+
+# After DNS + certbot:
+#   sudo certbot --nginx -d PROD_WEB_HOST -d PROD_API_HOST
