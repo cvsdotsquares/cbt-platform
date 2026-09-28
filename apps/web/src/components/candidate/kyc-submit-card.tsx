@@ -164,7 +164,7 @@ export function KycSubmitCard({ accessToken, kycStatus, kycDocument }: KycSubmit
             </div>
             <div>
               <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {birthDate?.label ?? 'Date of birth'}
+                {birthDate?.label ?? 'Year of birth'}
               </dt>
               <dd className="mt-0.5 font-medium">{birthDate?.text ?? 'Not readable'}</dd>
             </div>

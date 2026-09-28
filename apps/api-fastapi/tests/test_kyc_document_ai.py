@@ -36,11 +36,11 @@ def test_clear_matching_aadhaar_is_verified_automatically():
     )
     assert decision.auto_verified is True
     assert decision.document_type == "AADHAAR"
-    assert decision.date_of_birth == "2004-05-12"
-    assert decision.date_of_birth_precision == "full"
+    assert decision.date_of_birth == "2004"
+    assert decision.date_of_birth_precision == "year"
     assert decision.message == "Your Aadhaar card was verified automatically."
     assert decision.as_profile()["outcome"] == "VERIFIED"
-    assert decision.as_profile()["dateOfBirth"] == "2004-05-12"
+    assert decision.as_profile()["dateOfBirth"] == "2004"
 
 
 def test_unknown_document_goes_to_manual_review():
@@ -91,22 +91,22 @@ def test_placeholder_1_january_without_printed_text_is_kept_as_the_year():
     assert decision.date_of_birth_precision == "year"
 
 
-def test_printed_1_january_is_kept_as_a_full_date():
+def test_full_printed_date_is_stored_as_the_year():
     decision = decide_kyc_auto_verification(
-        model=_model(dateOfBirth="01/01/2004", dateOfBirthText="DOB: 01/01/2004"),
+        model=_model(dateOfBirth="12/05/2004", dateOfBirthText="DOB: 12/05/2004"),
         candidate_name="Rahul Sharma",
     )
-    assert decision.date_of_birth == "2004-01-01"
-    assert decision.date_of_birth_precision == "full"
+    assert decision.date_of_birth == "2004"
+    assert decision.date_of_birth_precision == "year"
 
 
-def test_missing_date_of_birth_is_not_auto_verified():
+def test_missing_year_of_birth_is_not_auto_verified():
     decision = decide_kyc_auto_verification(
         model=_model(dateOfBirth=""),
         candidate_name="Rahul Sharma",
     )
     assert decision.auto_verified is False
-    assert any("date of birth" in reason.lower() for reason in decision.reasons)
+    assert any("year of birth" in reason.lower() for reason in decision.reasons)
 
 
 def test_different_name_is_not_auto_verified():

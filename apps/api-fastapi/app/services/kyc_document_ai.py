@@ -53,15 +53,15 @@ _VERHOEFF_P = (
 
 _CLASSIFY_INSTRUCTIONS = """You inspect one identity-document image for a school exam KYC check.
 Classify it as exactly one of: AADHAAR, PAN, PASSPORT, DRIVING_LICENSE, UNKNOWN.
-Extract the document number, the person's name, and the date of birth exactly as printed.
-Do not invent digits, names, or dates. If a field is unreadable or hidden, return an empty string.
+Extract the document number, the person's name, and the year of birth exactly as printed.
+Do not invent digits, names, or years. If a field is unreadable or hidden, return an empty string.
 On a driving licence, nameOnDocument is only the licence holder's name from the Name field.
 Never use the Son/Daughter/Wife of line, or text marked S/O, D/O, W/O, or S/D/W. That line is a parent or spouse, not the holder.
-dateOfBirthText is the birth field copied exactly as printed, including its label. Examples: "DOB: 12/05/2004", "Year of Birth: 2004".
-dateOfBirth is DD/MM/YYYY only when a day, month, and year are all printed.
-Aadhaar cards often print "Year of Birth" or "YOB" instead of a full date. In that case dateOfBirth must be the four-digit year alone, such as 2004.
-Never replace a year of birth with 01/01/YYYY, 1 January, or any other placeholder day. Use 1 January only when that full date is printed on the card.
-Set readable to true only when the document type, number, name, and date or year of birth can be read.
+dateOfBirthText is the birth field copied exactly as printed, including its label. Examples: "Year of Birth: 2004", "YOB: 2004", "DOB: 12/05/2004".
+dateOfBirth is the four-digit year of birth only, such as 2004.
+Read that year from "Year of Birth", "YOB", or the year inside a printed date of birth. Never return a day or month, and never invent 01/01/YYYY.
+Aadhaar cards often print only the year of birth. That year is enough.
+Set readable to true only when the document type, number, name, and year of birth can be read.
 Set looksAuthentic to true only when the image is a clear photo or scan of that real document type, with its usual layout.
 Set looksAuthentic to false for selfies, random photos, blank pages, screenshots of forms, heavily cropped images, or a different document.
 confidence is a number from 0 to 1 for how sure you are of the type and that this is a genuine capture of that document.
@@ -151,39 +151,30 @@ def year_only_birth(value: str) -> str:
     return ""
 
 
-def _is_january_first(iso_date: str) -> bool:
-    return bool(re.fullmatch(r"\d{4}-01-01", iso_date or ""))
+def birth_year(value: str) -> str:
+    """The four-digit year from a year-of-birth field or a full printed date."""
+    year = year_only_birth(value)
+    if year:
+        return year
+    parsed = parse_date_of_birth(value) if (value or "").strip() else ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", parsed):
+        return parsed[:4]
+    if re.fullmatch(r"\d{4}", parsed):
+        return parsed
+    return ""
 
 
 def resolve_date_of_birth(printed: str, structured: str) -> tuple[str, str]:
-    """Return the birth value and whether it is a full date or a year only.
-
-    Models often turn "Year of Birth: 2004" into 01/01/2004. Keep the year unless
-    the card text itself prints 1 January.
-    """
-    printed_year = year_only_birth(printed)
-    if printed_year:
-        return printed_year, "year"
-
-    printed_date = parse_date_of_birth(printed) if printed.strip() else ""
-    if printed_date:
-        return printed_date, "full"
-
-    structured_year = year_only_birth(structured)
-    if structured_year:
-        return structured_year, "year"
-
-    structured_date = parse_date_of_birth(structured) if structured.strip() else ""
-    if structured_date and _is_january_first(structured_date):
-        return structured_date[:4], "year"
-    if structured_date:
-        return structured_date, "full"
+    """Return the year of birth. A full printed date is reduced to its year."""
+    year = birth_year(printed) or birth_year(structured)
+    if year:
+        return year, "year"
     return "", ""
 
 
 def parse_date_of_birth(value: str) -> str:
     raw = re.sub(
-        r"^(dob|date of birth|d\.o\.b)\s*[:\-]?\s*",
+        r"^(?:dob|date of birth|d\.?\s*o\.?\s*b\.?|year of birth|birth year|y\.?\s*o\.?\s*b\.?)\s*[:\-]?\s*",
         "",
         (value or "").strip(),
         flags=re.IGNORECASE,
@@ -330,7 +321,7 @@ def decide_kyc_auto_verification(
         elif _name_tokens(candidate_name) and not names_loosely_match(candidate_name, name_on_document):
             reasons.append("The name on the document does not match the student profile")
         if not date_of_birth:
-            reasons.append("The date of birth could not be read from the document")
+            reasons.append("The year of birth could not be read from the document")
 
     auto_verified = identified and not reasons
     checked_at = datetime.now(timezone.utc).isoformat()
@@ -506,7 +497,7 @@ async def _classify_document_image(content_part: dict) -> dict:
                 "content": [
                     {
                         "type": "text",
-                        "text": "Identify this uploaded identity document and extract the name, document number, and date of birth.",
+                        "text": "Identify this uploaded identity document and extract the name, document number, and year of birth.",
                     },
                     content_part,
                 ],
