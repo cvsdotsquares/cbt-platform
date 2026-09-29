@@ -35,16 +35,6 @@ export class TenantsController {
     return this.tenantsService.getBranding(tenantId);
   }
 
-  @Patch('me/branding')
-  @RequirePermissions(Permission.TENANT_BRANDING)
-  @ApiOperation({ summary: 'Update branding for the current user\'s institute' })
-  updateMyBranding(
-    @CurrentUser('tenantId') tenantId: string,
-    @Body() branding: UpdateBrandingDto,
-  ) {
-    return this.tenantsService.updateBranding(tenantId, branding as Record<string, unknown>);
-  }
-
   @Get(':id')
   @RequirePermissions(Permission.TENANT_READ)
   @ApiOperation({ summary: 'Get tenant details' })
