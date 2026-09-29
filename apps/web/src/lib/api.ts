@@ -1141,8 +1141,8 @@ export const tenantsApi = {
       '/tenants/me/branding',
       authHeaders(token),
     ),
-  updateBranding: (token: string, _id: string, branding: unknown) =>
-    apiFetch('/tenants/me/branding', {
+  updateBranding: (token: string, id: string, branding: unknown) =>
+    apiFetch(`/tenants/${encodeURIComponent(id)}/branding`, {
       method: 'PATCH',
       body: JSON.stringify(branding),
       ...authHeaders(token),
