@@ -1,4 +1,11 @@
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import {
+  BadGatewayException,
+  BadRequestException,
+  Injectable,
+  Logger,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProctoringService } from '../proctoring/proctoring.service';
@@ -46,27 +53,21 @@ export class AiService {
     count: number;
     difficulty: string;
     type: string;
-  }): Promise<{ questions: GeneratedQuestion[]; source: 'openai' | 'template'; message?: string }> {
+  }): Promise<{ questions: GeneratedQuestion[]; source: 'openai' }> {
     const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
-    if (apiKey) {
-      try {
-        const questions = await this.generateWithOpenAI(apiKey, params);
-        return { questions, source: 'openai' };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.warn(`OpenAI failed, using template: ${msg}`);
-        return {
-          questions: this.generateFromTemplate(params),
-          source: 'template',
-          message: `OpenAI unavailable (${msg}). Using template fallback.`,
-        };
-      }
+    if (!apiKey) {
+      throw new BadRequestException(
+        'OPENAI_API_KEY is not configured. Set it in apps/api/.env to generate real AI questions.',
+      );
     }
-    return {
-      questions: this.generateFromTemplate(params),
-      source: 'template',
-      message: 'Set OPENAI_API_KEY in .env to enable real AI generation.',
-    };
+    try {
+      const questions = await this.generateWithOpenAI(apiKey, params);
+      return { questions, source: 'openai' };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`OpenAI question generation failed: ${msg}`);
+      throw new BadGatewayException(`OpenAI question generation failed: ${msg}`);
+    }
   }
 
   private async generateWithOpenAI(

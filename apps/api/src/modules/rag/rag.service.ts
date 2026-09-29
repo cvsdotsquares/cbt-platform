@@ -613,8 +613,40 @@ export class RagService {
     }));
   }
 
+  /** Chapters that have at least one indexed body chunk (not just TOC lines). */
+  async getReadableChapterIds(
+    tenantId: string,
+    subjectId: string,
+    chapterIds: string[],
+  ): Promise<Set<string>> {
+    if (!chapterIds.length) return new Set();
+    const chunks = await this.prisma.documentChunk.findMany({
+      where: {
+        chapterId: { in: chapterIds },
+        subjectId,
+        material: { tenantId, status: 'READY' },
+      },
+      select: { chapterId: true, content: true },
+    });
+    const readable = new Set<string>();
+    for (const chunk of chunks) {
+      if (chunk.chapterId && this.isSubstantiveChunk(chunk.content)) {
+        readable.add(chunk.chapterId);
+      }
+    }
+    return readable;
+  }
+
+  async getDoneChapterIds(batchId: string): Promise<string[]> {
+    const progress = await this.prisma.syllabusProgress.findMany({
+      where: { batchId, status: 'COMPLETED', chapterId: { not: null } },
+      select: { chapterId: true },
+    });
+    return [...new Set(progress.map((p) => p.chapterId!).filter(Boolean))];
+  }
+
   /** Body text, not a chapter heading or table-of-contents line. */
-  private isSubstantiveChunk(content: string): boolean {
+  isSubstantiveChunk(content: string): boolean {
     const text = content.trim();
     const words = text.split(/\s+/).filter(Boolean);
     if (text.length < 180 || words.length < 28) return false;

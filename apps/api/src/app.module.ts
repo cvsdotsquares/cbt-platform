@@ -8,6 +8,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { RedisThrottlerStorage } from './redis/redis-throttler.storage';
 import { AuthModule } from './modules/auth/auth.module';
+import { RolePermissionsModule } from './modules/auth/role-permissions.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
 import { CandidatesModule } from './modules/candidates/candidates.module';
@@ -55,6 +56,7 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
       }),
     }),
     PrismaModule,
+    RolePermissionsModule,
     AuthModule,
     TenantsModule,
     UsersModule,

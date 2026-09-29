@@ -869,14 +869,14 @@ Include all chapters from Contents. Each chapter should have 1-8 topics when sec
       };
     });
 
-    return this.splitSwallowedChapters(chapters);
+    return this.fillEmptyChaptersFromLaterBodies(this.splitSwallowedChapters(chapters));
   }
 
   /** If one chapter's text runs through later chapters, cut those chapters back out. */
   private splitSwallowedChapters(chapters: ExtractedChapter[]): ExtractedChapter[] {
     for (let i = 0; i < chapters.length - 1; i++) {
       const content = chapters[i].content;
-      if (content.length < 4000) continue;
+      if (content.length < 1200) continue;
 
       const found: { index: number; at: number }[] = [];
       for (let j = i + 1; j < chapters.length; j++) {
@@ -896,6 +896,40 @@ Include all chapters from Contents. Each chapter should have 1-8 topics when sec
       }
     }
     return chapters;
+  }
+
+  /** Pull chapter body out of a later chapter blob when earlier chapters only got TOC lines. */
+  private fillEmptyChaptersFromLaterBodies(chapters: ExtractedChapter[]): ExtractedChapter[] {
+    const result = chapters.map((ch) => ({ ...ch, content: ch.content }));
+    for (let i = 0; i < result.length; i++) {
+      if (result[i].content.trim().length >= 180) continue;
+      for (let j = 0; j < result.length; j++) {
+        if (j === i || result[j].content.length < 1200) continue;
+        const at = this.indexOfChapterTitle(result[j].content, result[i].title);
+        if (at < 0) continue;
+        const end = this.endOfChapterSlice(result[j].content, result, i + 1, at);
+        const slice = result[j].content.slice(at, end).trim();
+        if (slice.length >= 180 && !this.isContentsLine(slice)) {
+          result[i].content = slice;
+          break;
+        }
+      }
+    }
+    return result;
+  }
+
+  private endOfChapterSlice(
+    text: string,
+    chapters: ExtractedChapter[],
+    fromIndex: number,
+    start: number,
+  ): number {
+    let end = text.length;
+    for (let k = fromIndex; k < chapters.length; k++) {
+      const at = this.indexOfChapterTitle(text, chapters[k].title);
+      if (at > start + 200 && at < end) end = at;
+    }
+    return end;
   }
 
   private indexOfChapterTitle(text: string, title: string): number {

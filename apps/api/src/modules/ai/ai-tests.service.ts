@@ -58,7 +58,7 @@ export class AiTestsService {
     let chapterIds = (params.chapterIds ?? []).filter((id) => uploaded.has(id));
 
     if (params.syllabusScope === 'COMPLETED_ONLY' && params.batchId) {
-      const completed = await this.ragService.getCompletedChapterIds(params.batchId);
+      const completed = await this.ragService.getDoneChapterIds(params.batchId);
       chapterIds = chapterIds.length
         ? chapterIds.filter((id) => completed.includes(id))
         : completed.filter((id) => uploaded.has(id));
@@ -76,6 +76,29 @@ export class AiTestsService {
       }
     } else if (!chapterIds.length) {
       chapterIds = [...uploaded];
+    }
+
+    const requestedChapterIds = [...chapterIds];
+    chapterIds = await this.resolveReadableChapterIds(
+      params.tenantId,
+      params.subjectId,
+      chapterIds,
+      params.batchId,
+      params.syllabusScope === 'COMPLETED_ONLY',
+    );
+    if (!chapterIds.length) {
+      const chapterLabels = await this.describeUnreadableChapters(
+        params.tenantId,
+        requestedChapterIds,
+      );
+      const hint = chapterLabels.length
+        ? ` No readable body text for: ${chapterLabels.join('; ')}.`
+        : '';
+      throw new BadRequestException(
+        'The selected chapter(s) do not have enough readable body text to create a test.'
+        + hint
+        + ' For Class 10 use Science chapters 1–3, or re-index the book from Books & Notes.',
+      );
     }
 
     const query = params.query
@@ -105,33 +128,26 @@ export class AiTestsService {
       return text.length >= 180 && words >= 28 && /[.?!]/.test(text);
     });
     if (readableChunks.length < 1) {
+      const chapterLabels = await this.describeUnreadableChapters(
+        params.tenantId,
+        params.chapterIds ?? [],
+      );
+      const hint = chapterLabels.length
+        ? ` No readable body text for: ${chapterLabels.join('; ')}.`
+        : '';
       throw new BadRequestException(
-        'The uploaded book does not have enough readable chapter text to create a test. '
-        + 'Wait until the upload status is Ready. A 64 MB ebook can take a few minutes to index. '
-        + 'If it is already Ready, re-upload a text-based PDF — scanned image ebooks only produce chapter titles.',
+        'The selected chapter(s) do not have enough readable body text to create a test.'
+        + hint
+        + ' Pick a chapter that was indexed with full content (e.g. Science chapters 1–3 on Class 10),'
+        + ' or re-index the book from Books & Notes and try again.',
       );
     }
 
     const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
     if (!apiKey) {
-      const fallbackQuestions = this.generateFallbackQuestions(
-        subject.name,
-        params.count ?? 10,
-        params.difficulty ?? 'MEDIUM',
-        params.types ?? ['MCQ'],
+      throw new BadRequestException(
+        'OPENAI_API_KEY is not configured. Set it in apps/api/.env to generate real AI questions from uploaded books.',
       );
-      const avgConfidence = chunks.reduce((s, c) => s + c.score, 0) / chunks.length;
-      return {
-        questions: fallbackQuestions,
-        source: 'template' as const,
-        chunks,
-        sourceChunkIds: chunks.map((c) => c.id),
-        sourceMaterialIds: [...new Set(chunks.map((c) => c.materialId))],
-        sourceChapterId: chapterIds[0],
-        confidenceScore: avgConfidence,
-        contextUsed: chunks.length,
-        message: 'Set OPENAI_API_KEY to generate questions from OpenAI. Showing type-specific dummy questions.',
-      };
     }
 
     const count = params.count ?? 10;
@@ -822,6 +838,62 @@ Vary the correct option across questions — do not always use "a".`;
     return q;
   }
 
+  private isReadableChunkContent(content: string): boolean {
+    return this.ragService.isSubstantiveChunk(content);
+  }
+
+  private async resolveReadableChapterIds(
+    tenantId: string,
+    subjectId: string,
+    chapterIds: string[],
+    batchId: string | undefined,
+    completedOnly: boolean,
+  ): Promise<string[]> {
+    let candidates = [...new Set(chapterIds)];
+    let readable = await this.ragService.getReadableChapterIds(tenantId, subjectId, candidates);
+    let picked = candidates.filter((id) => readable.has(id));
+    if (picked.length) return picked;
+
+    if (completedOnly && batchId) {
+      const subject = await this.prisma.subject.findUnique({
+        where: { id: subjectId },
+        select: { academicClassId: true },
+      });
+      if (!subject) return [];
+      const done = await this.ragService.getDoneChapterIds(batchId);
+      const uploaded = await this.ragService.getUploadedChapterIds(
+        tenantId,
+        subject.academicClassId,
+        subjectId,
+      );
+      candidates = done.filter((id) => uploaded.has(id));
+      readable = await this.ragService.getReadableChapterIds(tenantId, subjectId, candidates);
+      return candidates.filter((id) => readable.has(id));
+    }
+
+    return [];
+  }
+
+  private async describeUnreadableChapters(tenantId: string, chapterIds: string[]): Promise<string[]> {
+    if (!chapterIds.length) return [];
+    const chapters = await this.prisma.chapter.findMany({
+      where: { id: { in: chapterIds } },
+      select: {
+        id: true,
+        number: true,
+        title: true,
+        documentChunks: {
+          where: { material: { tenantId, status: 'READY' } },
+          select: { content: true },
+          take: 20,
+        },
+      },
+    });
+    return chapters
+      .filter((ch) => !ch.documentChunks.some((chunk) => this.isReadableChunkContent(chunk.content)))
+      .map((ch) => `Ch${ch.number} ${ch.title}`);
+  }
+
   private aiExamSettings(
     durationMinutes: number,
     extra: Record<string, unknown> = {},
@@ -1121,6 +1193,158 @@ Vary the correct option across questions — do not always use "a".`;
     const base = Math.max(1, Math.floor(total / subjectCount));
     const remainder = total - base * subjectCount;
     return Array.from({ length: subjectCount }, (_, i) => base + (i < remainder ? 1 : 0));
+  }
+
+  async generateReferenceAnswer(input: {
+    tenantId: string;
+    questionText: string;
+    questionType: string;
+    subjectName?: string;
+    chapterTitle?: string;
+    chapterId?: string;
+    options?: Record<string, string>;
+    regenerate?: boolean;
+  }) {
+    const questionText = input.questionText?.trim() ?? '';
+    if (questionText.length < 10) {
+      throw new BadRequestException('Question text is too short');
+    }
+    const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
+    if (!apiKey) {
+      throw new BadRequestException('Set OPENAI_API_KEY to generate reference answers with AI.');
+    }
+
+    const qtype = (input.questionType || 'SUBJECTIVE').toUpperCase();
+    const isChoice = qtype === 'MCQ' || qtype === 'MSQ';
+    const isMsq = qtype === 'MSQ';
+    let context = '';
+    if (input.chapterId) {
+      const chunks = await this.prisma.documentChunk.findMany({
+        where: { chapterId: input.chapterId },
+        orderBy: { chunkIndex: 'asc' },
+        take: 6,
+        select: { content: true },
+      });
+      context = chunks.map((chunk) => chunk.content).join('\n\n').slice(0, 6000);
+    }
+
+    const topics = [input.subjectName, input.chapterTitle].filter(Boolean).join(' · ');
+    const baseUrl = this.config.get('OPENAI_BASE_URL') || 'https://api.openai.com/v1';
+    const model = this.config.get('OPENAI_MODEL') || 'gpt-4o-mini';
+    const schema = isChoice
+      ? {
+          type: 'object',
+          properties: {
+            options: {
+              type: 'object',
+              properties: {
+                a: { type: 'string' },
+                b: { type: 'string' },
+                c: { type: 'string' },
+                d: { type: 'string' },
+              },
+              required: ['a', 'b', 'c', 'd'],
+              additionalProperties: false,
+            },
+            correctAnswer: {
+              type: 'object',
+              properties: {
+                value: isMsq
+                  ? { type: 'array', items: { type: 'string', enum: ['a', 'b', 'c', 'd'] } }
+                  : { type: 'string', enum: ['a', 'b', 'c', 'd'] },
+              },
+              required: ['value'],
+              additionalProperties: false,
+            },
+          },
+          required: ['options', 'correctAnswer'],
+          additionalProperties: false,
+        }
+      : {
+          type: 'object',
+          properties: {
+            referenceAnswer: { type: 'string' },
+            rubric: { type: 'string' },
+            correctAnswer: {
+              type: 'object',
+              properties: {
+                value: { type: 'string' },
+                rubric: { type: 'string' },
+              },
+              required: ['value', 'rubric'],
+              additionalProperties: false,
+            },
+          },
+          required: ['referenceAnswer', 'rubric', 'correctAnswer'],
+          additionalProperties: false,
+        };
+
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        temperature: input.regenerate ? 0.8 : 0.4,
+        messages: [
+          {
+            role: 'system',
+            content: 'You generate exam answer keys for Indian NCERT-style CBT questions. Return only valid JSON.',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              questionType: qtype,
+              questionText,
+              topics: topics || undefined,
+              sourceContext: context || undefined,
+              existingOptions: isChoice ? input.options : undefined,
+              regenerate: Boolean(input.regenerate),
+              rules: [
+                'Ground the answer in sourceContext when it is provided.',
+                'For MCQ/MSQ, write four distinct chapter-specific options.',
+                'For SUBJECTIVE/CASE_STUDY, referenceAnswer must be a complete model answer.',
+              ],
+            }),
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: { name: 'reference_answer', strict: true, schema },
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      this.logger.warn(`OpenAI reference answer failed ${res.status}: ${body.slice(0, 500)}`);
+      throw new BadRequestException('AI could not generate an answer. Try again.');
+    }
+
+    const data = await res.json() as { choices: { message: { content: string } }[] };
+    const parsed = JSON.parse(data.choices[0].message.content) as {
+      options?: Record<string, string>;
+      referenceAnswer?: string;
+      rubric?: string;
+      correctAnswer?: { value?: string | string[]; rubric?: string };
+    };
+
+    if (isChoice) {
+      return {
+        options: parsed.options,
+        correctAnswer: parsed.correctAnswer,
+      };
+    }
+
+    const reference = (parsed.referenceAnswer || parsed.correctAnswer?.value || '').toString().trim();
+    const rubric = (parsed.rubric || parsed.correctAnswer?.rubric || 'Award marks for accuracy, relevant reasoning, and clarity.').trim();
+    if (!reference) {
+      throw new BadRequestException('AI returned an empty reference answer');
+    }
+    return {
+      referenceAnswer: reference,
+      rubric,
+      correctAnswer: { value: reference, rubric },
+    };
   }
 
   async generateExplanation(questionText: string, correctAnswer: string, chunks?: RetrievedChunk[]) {

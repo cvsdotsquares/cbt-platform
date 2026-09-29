@@ -7,6 +7,7 @@ import {
   teacherHasBatchAccess,
   teacherHasSubjectAccess,
 } from '../../common/utils/teacher-scope.util';
+import { RagService } from '../rag/rag.service';
 
 type BatchWriteData = {
   academicClassId: string;
@@ -17,7 +18,10 @@ type BatchWriteData = {
 
 @Injectable()
 export class BatchesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private ragService: RagService,
+  ) {}
 
   async findAll(tenantId: string, teacherUserId?: string) {
     const batchIds = teacherUserId
@@ -516,7 +520,22 @@ export class BatchesService {
       } as typeof chapter & { status: string; topics: (typeof chapter.topics[0] & { status: string })[] });
     }
 
-    return [...bySubject.values()]
+    const result = [...bySubject.values()];
+    await Promise.all(
+      result.map(async (entry) => {
+        const readable = await this.ragService.getReadableChapterIds(
+          tenantId,
+          entry.subject.id,
+          entry.chapters.map((ch) => ch.id),
+        );
+        entry.chapters = entry.chapters.map((ch) => ({
+          ...ch,
+          readableForTest: readable.has(ch.id),
+        }));
+      }),
+    );
+
+    return result
       .map((entry) => ({
         subject: entry.subject,
         chapters: entry.chapters.sort((a, b) => a.number - b.number),

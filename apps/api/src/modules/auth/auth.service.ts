@@ -124,7 +124,7 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, ipAddress: string, userAgent: string) {
-    const tenant = await this.resolveTenant(dto.tenantId);
+    const tenant = await this.resolveLoginTenant(dto.tenantId, dto.email);
     if (!tenant) throw new BadRequestException('Invalid tenant');
 
     const user = await this.prisma.user.findUnique({
@@ -423,6 +423,29 @@ export class AuthService {
 
   private async resolveTenant(tenantId?: string) {
     return resolveTenantCached(this.prisma, tenantId);
+  }
+
+  /**
+   * The web build can send a stale NEXT_PUBLIC_TENANT_ID. When that organization
+   * is not in this database, use the organization that actually owns the email
+   * if the address exists in exactly one active tenant.
+   */
+  private async resolveLoginTenant(tenantId: string | undefined, email: string) {
+    const tenant = await this.resolveTenant(tenantId);
+    if (tenant) return tenant;
+
+    const matches = await this.prisma.user.findMany({
+      where: { email: email.trim() },
+      select: { tenantId: true },
+      distinct: ['tenantId'],
+      take: 2,
+    });
+    if (matches.length !== 1) return null;
+
+    return this.prisma.tenant.findFirst({
+      where: { id: matches[0].tenantId, isActive: true },
+      select: { id: true, slug: true },
+    });
   }
 
   private parseRefreshExpiry(expiry: string): Date {

@@ -1,14 +1,17 @@
 import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Permission, hasPermission, Role } from '@cbt/shared';
+import { Permission, JwtPayload } from '@cbt/shared';
 import { PERMISSIONS_KEY } from '../decorators/permissions.decorator';
-import { JwtPayload } from '@cbt/shared';
+import { RolePermissionsService } from '../../modules/auth/role-permissions.service';
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {
-  constructor(private reflector: Reflector) {}
+  constructor(
+    private reflector: Reflector,
+    private rolePermissions: RolePermissionsService,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const requiredPermissions = this.reflector.getAllAndOverride<Permission[]>(
       PERMISSIONS_KEY,
       [context.getHandler(), context.getClass()],
@@ -25,14 +28,14 @@ export class PermissionsGuard implements CanActivate {
       throw new ForbiddenException('Authentication required');
     }
 
-    const hasAllPermissions = requiredPermissions.every((permission) =>
-      hasPermission(user.roles as Role[], permission),
-    );
+    const { permissions } = await this.rolePermissions.effectiveForRoles(user.tenantId, user.roles ?? []);
+    const granted = new Set(permissions);
+    const hasAllPermissions = requiredPermissions.every((permission) => granted.has(permission));
 
     if (!hasAllPermissions) {
       throw new ForbiddenException('Insufficient permissions');
     }
-    console.log('hasAllPermissions', hasAllPermissions);
+
     return true;
   }
 }

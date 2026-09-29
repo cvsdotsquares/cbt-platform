@@ -23,12 +23,17 @@ import {
 import { Public } from '../../common/decorators/permissions.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { JwtPayload } from '@cbt/shared';
+import { RolePermissionsService } from './role-permissions.service';
 import { Request } from 'express';
 
 @ApiTags('Authentication')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private rolePermissions: RolePermissionsService,
+  ) {}
 
   @Public()
   @Post('invite/validate')
@@ -110,6 +115,14 @@ export class AuthController {
     @Body('totpCode') totpCode: string,
   ) {
     return this.authService.confirmMfa(userId, totpCode);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('effective-permissions')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Permissions granted to the signed-in user' })
+  effectivePermissions(@CurrentUser() user: JwtPayload) {
+    return this.rolePermissions.effectiveForRoles(user.tenantId, user.roles ?? []);
   }
 
   @UseGuards(JwtAuthGuard)

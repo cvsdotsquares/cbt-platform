@@ -115,7 +115,7 @@ export class CandidatesService {
           SELECT DISTINCT ON (be.candidate_id) be.candidate_id, be.batch_id
           FROM batch_enrollments be
           INNER JOIN candidates c ON c.id = be.candidate_id
-          WHERE c.tenant_id = ${tenantId}::uuid
+          WHERE c.tenant_id = ${tenantId}::text
           ORDER BY be.candidate_id, be.enrolled_at ASC
         ) pe
         INNER JOIN batches b ON b.id = pe.batch_id

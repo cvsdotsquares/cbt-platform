@@ -7,8 +7,11 @@ import { AuthService } from './auth.service';
 import { MfaService } from './mfa.service';
 import { RegistrationInviteService } from './registration-invite.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { RolePermissionsController } from './role-permissions.controller';
+import { RolePermissionsModule } from './role-permissions.module';
 @Module({
   imports: [
+    RolePermissionsModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -19,7 +22,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       inject: [ConfigService],
     }),
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, RolePermissionsController],
   providers: [AuthService, MfaService, RegistrationInviteService, JwtStrategy],
   exports: [AuthService, RegistrationInviteService, JwtModule],
 })

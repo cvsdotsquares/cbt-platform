@@ -195,6 +195,24 @@ export class AiController {
     return this.aiTestsService.createAiTest(user.tenantId, user.sub, body);
   }
 
+  @Post('reference-answer/generate')
+  @RequirePermissions(Permission.AI_GENERATE_TEST)
+  @ApiOperation({ summary: 'Generate a reference answer or fresh MCQ options' })
+  generateReferenceAnswer(
+    @CurrentUser('tenantId') tenantId: string,
+    @Body() body: {
+      questionText: string;
+      questionType: string;
+      subjectName?: string;
+      chapterTitle?: string;
+      chapterId?: string;
+      options?: Record<string, string>;
+      regenerate?: boolean;
+    },
+  ) {
+    return this.aiTestsService.generateReferenceAnswer({ ...body, tenantId });
+  }
+
   @Post('explain')
   @RequirePermissions(Permission.EXAM_VIEW_RESPONSE)
   @ApiOperation({ summary: 'Generate AI explanation for an answer' })
