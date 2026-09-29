@@ -12,11 +12,28 @@ import app.routers.auth as _auth_mod
 def apply_migrations():
     """Run alembic upgrade head once before the whole test session."""
     project_root = Path(__file__).resolve().parents[1]
-    subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=str(project_root),
-        check=True,
+        capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        combined = f"{result.stdout}\n{result.stderr}"
+        # Local dev DB is often created by Prisma first; stamp Alembic to head then continue.
+        if "already exists" in combined or "DuplicateTable" in combined:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "stamp", "head"],
+                cwd=str(project_root),
+                check=True,
+            )
+        else:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                result.args,
+                result.stdout,
+                result.stderr,
+            )
     yield
 
 

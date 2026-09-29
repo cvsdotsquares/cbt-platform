@@ -10,6 +10,7 @@ from app.routers.ai import (
     _is_placeholder_reference_answer,
     _normalize_msq_answer_value,
     _resolve_chapter_ids,
+    _try_accept_ai_question_candidate,
 )
 
 
@@ -40,6 +41,24 @@ class _Db:
 )
 def test_normalize_msq_answer_value_accepts_common_provider_formats(value):
     assert _normalize_msq_answer_value(value) == ["a", "c"]
+
+
+def test_try_accept_accepts_msq_with_array_correct_answer():
+    item = {
+        "type": "MSQ",
+        "content": {"text": "Which statements about evaporation are correct? Select all that apply."},
+        "options": {"a": "A", "b": "B", "c": "C", "d": "D"},
+        "correct_answer": {"value": ["a", "c"]},
+    }
+    accepted = _try_accept_ai_question_candidate(
+        item,
+        types=["MSQ"],
+        slot_index=0,
+        seen_fingerprints=set(),
+        strict_type_order=True,
+    )
+    assert accepted is not None
+    assert accepted[1] == "MSQ"
 
 
 @pytest.mark.anyio
