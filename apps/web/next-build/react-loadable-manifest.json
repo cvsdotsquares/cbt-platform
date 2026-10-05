@@ -1,0 +1,31 @@
+{
+  "..\\..\\..\\node_modules\\.pnpm\\next@15.5.19_react-dom@19.2.7_react@19.2.7__react@19.2.7\\node_modules\\next\\dist\\client\\index.js -> ../pages/_app": {
+    "id": 96295,
+    "files": [
+      "static/chunks/6295.1b2781229052abec.js"
+    ]
+  },
+  "..\\..\\..\\node_modules\\.pnpm\\next@15.5.19_react-dom@19.2.7_react@19.2.7__react@19.2.7\\node_modules\\next\\dist\\client\\index.js -> ../pages/_error": {
+    "id": 12338,
+    "files": [
+      "static/chunks/2338.54b8ba15b705f67f.js"
+    ]
+  },
+  "app\\(auth)\\login\\page.tsx -> @/lib/auth-session": {
+    "id": 2659,
+    "files": []
+  },
+  "app\\(dashboard)\\layout.tsx -> @/components/ai/ai-assistant": {
+    "id": 17217,
+    "files": [
+      "static/chunks/7217.c56405c0ae2d7da3.js"
+    ]
+  },
+  "hooks\\use-live-notifications.ts -> @/lib/socket": {
+    "id": 20169,
+    "files": [
+      "static/chunks/3051-a270aecca18c57f1.js",
+      "static/chunks/169.5879c5027e6639b2.js"
+    ]
+  }
+}
