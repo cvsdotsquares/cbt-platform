@@ -60,6 +60,7 @@ jobs:
           DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/cbt_test
           ASYNC_DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/cbt_test
           JWT_SECRET: test-jwt-secret-min-32-characters-long
+          SKIP_TEST_MIGRATIONS: "1"
         run: pytest tests/test_health.py -q
 
   security:

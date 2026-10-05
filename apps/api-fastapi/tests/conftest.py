@@ -1,3 +1,4 @@
+import os
 import pytest
 import subprocess
 import sys
@@ -11,6 +12,10 @@ import app.routers.auth as _auth_mod
 @pytest.fixture(scope="session", autouse=True)
 def apply_migrations():
     """Run alembic upgrade head once before the whole test session."""
+    if os.getenv("SKIP_TEST_MIGRATIONS", "").lower() in ("1", "true", "yes"):
+        yield
+        return
+
     project_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
