@@ -11,7 +11,7 @@ GIT_REF="${1:-}"
 
 ROOT="${CBT_APP_ROOT:-}"
 if [[ -z "$ROOT" ]]; then
-  echo "ERROR: set CBT_APP_ROOT to the app checkout path (e.g. /var/www/cbt/app)"
+  echo "ERROR: set CBT_APP_ROOT to the app checkout path (e.g. /home/cbtplatform/cbt-platform)"
   exit 1
 fi
 
@@ -29,5 +29,5 @@ else
   git reset --hard origin/main
 fi
 
-chmod +x scripts/deploy/deploy.sh scripts/deploy/remote-deploy.sh
+chmod +x scripts/deploy/deploy.sh scripts/deploy/remote-deploy.sh scripts/deploy/start-api-prod.sh scripts/deploy/server-retire-cbt-app.sh
 ./scripts/deploy/deploy.sh

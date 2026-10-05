@@ -14,7 +14,7 @@ Legacy AWS/EKS/Docker sketches below are superseded by the company-server path u
 ```
 feature/* ──PR──► CI
                  │
-main ─────────────► deploy (/var/www/cbt/app)
+main ─────────────► deploy (/home/cbtplatform/cbt-platform)
 ```
 
 ## CD workflow
@@ -31,10 +31,10 @@ bash scripts/deploy/remote-deploy.sh <git-sha>
 That script pulls the commit, then [`scripts/deploy/deploy.sh`](../scripts/deploy/deploy.sh):
 
 1. `pnpm install --frozen-lockfile`
-2. Build shared + API + Web
-3. `prisma migrate deploy`
+2. Build shared + Web
+3. Python venv + `alembic upgrade head` (FastAPI)
 4. `pm2 startOrReload` (`infra/deploy/pm2/ecosystem.cjs`)
-5. Local health check on the API port
+5. Local health check on the API port (4010)
 
 ## Required GitHub secrets
 
@@ -61,7 +61,7 @@ Override with `CBT_API_PORT` / `CBT_WEB_PORT`. Nginx terminates HTTP(S) and prox
 
 ## Database migrations
 
-- Run automatically on every deploy via `prisma migrate deploy`
+- Run automatically on every deploy via Alembic in `apps/api-fastapi`
 - Prefer backward-compatible migrations
 - Avoid destructive changes shortly before scheduled exams
 
