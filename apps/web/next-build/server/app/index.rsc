@@ -1,0 +1,19 @@
+1:"$Sreact.fragment"
+2:I[1127,["2201","static/chunks/2201-3da9492cf74e6f6b.js","4640","static/chunks/4640-62b4aeb7e276e544.js","9037","static/chunks/9037-0b4717dd9985f375.js","7728","static/chunks/7728-ea8d99a2e116f170.js","2188","static/chunks/2188-12a075617812cb17.js","4221","static/chunks/4221-a03ccb3e9876e08a.js","4698","static/chunks/4698-78ac9dd848f6279e.js","7177","static/chunks/app/layout-1f096c6af0e7ac0b.js"],"Providers"]
+3:I[31876,[],""]
+4:I[18184,["2201","static/chunks/2201-3da9492cf74e6f6b.js","8039","static/chunks/app/error-0f7f3117e08ae078.js"],"default"]
+5:I[82722,[],""]
+7:I[58369,[],"OutletBoundary"]
+9:I[988,[],"AsyncMetadataOutlet"]
+b:I[58369,[],"ViewportBoundary"]
+d:I[58369,[],"MetadataBoundary"]
+e:"$Sreact.suspense"
+10:I[40822,["4219","static/chunks/app/global-error-bb3423c10674f3b4.js"],"default"]
+:HL["/_next/static/css/36d3ad196d96d2e6.css","style"]
+:HL["/_next/static/css/4c35f5ebd72c6bbe.css","style"]
+0:{"P":null,"b":"cCI2ZGsixs5x2wGT9iNl6","p":"","c":["",""],"i":false,"f":[[["",{"children":["__PAGE__",{}]},"$undefined","$undefined",true],["",["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/_next/static/css/36d3ad196d96d2e6.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","link","1",{"rel":"stylesheet","href":"/_next/static/css/4c35f5ebd72c6bbe.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]],["$","html",null,{"lang":"en","suppressHydrationWarning":true,"children":["$","body",null,{"className":"__variable_646807 font-sans","children":["$","$L2",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$4","errorStyles":[],"errorScripts":[],"template":["$","$L5",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]}]]}],{"children":["__PAGE__",["$","$1","c",{"children":["$L6",null,["$","$L7",null,{"children":["$L8",["$","$L9",null,{"promise":"$@a"}]]}]]}],{},null,false]},null,false],["$","$1","h",{"children":[null,[["$","$Lb",null,{"children":"$Lc"}],null],["$","$Ld",null,{"children":["$","div",null,{"hidden":true,"children":["$","$e",null,{"fallback":null,"children":"$Lf"}]}]}]]}],false]],"m":"$undefined","G":["$10",[]],"s":false,"S":true}
+6:E{"digest":"NEXT_REDIRECT;replace;/login;307;"}
+c:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1, maximum-scale=5"}]]
+8:null
+a:{"metadata":[["$","title","0",{"children":"NCERT Institute — Class-Based Examinations"}],["$","meta","1",{"name":"description","content":"NCERT-aligned class tests for institutes. Upload books, track syllabus progress, and run AI-generated chapter-wise assessments for Classes 9–12."}]],"error":null,"digest":"$undefined"}
+f:"$a:metadata"

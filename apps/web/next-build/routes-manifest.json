@@ -1,0 +1,236 @@
+{
+  "version": 3,
+  "pages404": true,
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [],
+    "fallback": []
+  },
+  "dynamicRoutes": [
+    {
+      "page": "/api/v1/[...path]",
+      "regex": "^/api/v1/(.+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPpath": "nxtPpath"
+      },
+      "namedRegex": "^/api/v1/(?<nxtPpath>.+?)(?:/)?$"
+    },
+    {
+      "page": "/exam/instructions/[examId]",
+      "regex": "^/exam/instructions/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPexamId": "nxtPexamId"
+      },
+      "namedRegex": "^/exam/instructions/(?<nxtPexamId>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/exam/start/[examId]",
+      "regex": "^/exam/start/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPexamId": "nxtPexamId"
+      },
+      "namedRegex": "^/exam/start/(?<nxtPexamId>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/verify/certificate/[id]",
+      "regex": "^/verify/certificate/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/verify/certificate/(?<nxtPid>[^/]+?)(?:/)?$"
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/dashboard",
+      "regex": "^/dashboard(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard(?:/)?$"
+    },
+    {
+      "page": "/dashboard/ai",
+      "regex": "^/dashboard/ai(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/ai(?:/)?$"
+    },
+    {
+      "page": "/dashboard/ai-tests",
+      "regex": "^/dashboard/ai\\-tests(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/ai\\-tests(?:/)?$"
+    },
+    {
+      "page": "/dashboard/analytics",
+      "regex": "^/dashboard/analytics(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/analytics(?:/)?$"
+    },
+    {
+      "page": "/dashboard/audit",
+      "regex": "^/dashboard/audit(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/audit(?:/)?$"
+    },
+    {
+      "page": "/dashboard/batches",
+      "regex": "^/dashboard/batches(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/batches(?:/)?$"
+    },
+    {
+      "page": "/dashboard/candidates",
+      "regex": "^/dashboard/candidates(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/candidates(?:/)?$"
+    },
+    {
+      "page": "/dashboard/exams",
+      "regex": "^/dashboard/exams(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/exams(?:/)?$"
+    },
+    {
+      "page": "/dashboard/guide",
+      "regex": "^/dashboard/guide(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/guide(?:/)?$"
+    },
+    {
+      "page": "/dashboard/institutes",
+      "regex": "^/dashboard/institutes(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/institutes(?:/)?$"
+    },
+    {
+      "page": "/dashboard/materials",
+      "regex": "^/dashboard/materials(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/materials(?:/)?$"
+    },
+    {
+      "page": "/dashboard/monitoring",
+      "regex": "^/dashboard/monitoring(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/monitoring(?:/)?$"
+    },
+    {
+      "page": "/dashboard/permissions",
+      "regex": "^/dashboard/permissions(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/permissions(?:/)?$"
+    },
+    {
+      "page": "/dashboard/questions",
+      "regex": "^/dashboard/questions(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/questions(?:/)?$"
+    },
+    {
+      "page": "/dashboard/results",
+      "regex": "^/dashboard/results(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/results(?:/)?$"
+    },
+    {
+      "page": "/dashboard/settings",
+      "regex": "^/dashboard/settings(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/settings(?:/)?$"
+    },
+    {
+      "page": "/dashboard/setup",
+      "regex": "^/dashboard/setup(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/setup(?:/)?$"
+    },
+    {
+      "page": "/dashboard/syllabus",
+      "regex": "^/dashboard/syllabus(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/syllabus(?:/)?$"
+    },
+    {
+      "page": "/dashboard/teacher",
+      "regex": "^/dashboard/teacher(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/teacher(?:/)?$"
+    },
+    {
+      "page": "/dashboard/users",
+      "regex": "^/dashboard/users(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dashboard/users(?:/)?$"
+    },
+    {
+      "page": "/help",
+      "regex": "^/help(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/help(?:/)?$"
+    },
+    {
+      "page": "/login",
+      "regex": "^/login(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/login(?:/)?$"
+    },
+    {
+      "page": "/mfa",
+      "regex": "^/mfa(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/mfa(?:/)?$"
+    },
+    {
+      "page": "/my-exams",
+      "regex": "^/my\\-exams(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/my\\-exams(?:/)?$"
+    },
+    {
+      "page": "/register",
+      "regex": "^/register(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/register(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSuffix": ".prefetch.rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments"
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}
