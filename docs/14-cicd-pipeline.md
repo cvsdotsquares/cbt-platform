@@ -9,28 +9,23 @@
 
 Legacy AWS/EKS/Docker sketches below are superseded by the company-server path unless you explicitly switch back.
 
-## Branch → environment
+## Branch → deploy
 
 ```
 feature/* ──PR──► CI
                  │
-dev ─────────────► development  (/var/www/cbt/dev)
-develop ──────────► staging       (/var/www/cbt/staging)
-main ─────────────► production    (/var/www/cbt/prod)  [manual approval]
-tags v* ──────────► release marker (optional); prod tracks main
+main ─────────────► deploy (/var/www/cbt/app)
 ```
 
-## CD workflows (placeholders)
+## CD workflow
 
-- [`.github/workflows/deploy-dev.yml`](../.github/workflows/deploy-dev.yml)
-- [`.github/workflows/deploy-staging.yml`](../.github/workflows/deploy-staging.yml)
-- [`.github/workflows/deploy-production.yml`](../.github/workflows/deploy-production.yml)
+- [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)
 
-Each job SSHs to `DEPLOY_HOST` and runs:
+The job SSHs to `DEPLOY_HOST` and runs:
 
 ```bash
-export CBT_APP_ROOT=...   # DEPLOY_PATH_*
-bash scripts/deploy/remote-deploy.sh <env> <git-sha>
+export CBT_APP_ROOT=...   # DEPLOY_PATH secret
+bash scripts/deploy/remote-deploy.sh <git-sha>
 ```
 
 That script pulls the commit, then [`scripts/deploy/deploy.sh`](../scripts/deploy/deploy.sh):
@@ -38,7 +33,7 @@ That script pulls the commit, then [`scripts/deploy/deploy.sh`](../scripts/deplo
 1. `pnpm install --frozen-lockfile`
 2. Build shared + API + Web
 3. `prisma migrate deploy`
-4. `pm2 startOrReload` for that env
+4. `pm2 startOrReload` (`infra/deploy/pm2/ecosystem.cjs`)
 5. Local health check on the API port
 
 ## Required GitHub secrets
@@ -49,23 +44,20 @@ That script pulls the commit, then [`scripts/deploy/deploy.sh`](../scripts/deplo
 | `DEPLOY_USER` | SSH user |
 | `DEPLOY_SSH_KEY` | Private key |
 | `DEPLOY_SSH_PORT` | SSH port (often `22`) |
-| `DEPLOY_PATH_DEV` | Absolute path to dev checkout |
-| `DEPLOY_PATH_STAGING` | Absolute path to staging checkout |
-| `DEPLOY_PATH_PRODUCTION` | Absolute path to prod checkout |
+| `DEPLOY_PATH` | Absolute path to the app checkout |
 
-Optional variable: `PROD_API_HEALTH_URL` for post-deploy public smoke check.
+Optional variable: `API_HEALTH_URL` for post-deploy public smoke check.
 
 ## Process layout (PM2)
 
-Configs under `infra/deploy/pm2/`:
+Config: `infra/deploy/pm2/ecosystem.cjs`
 
-| Env | API port | Web port |
-|-----|----------|----------|
-| dev | 4010 | 3010 |
-| staging | 4020 | 3020 |
-| production | 4030 | 3030 |
+| Service | Default port |
+|---------|----------------|
+| API | 4010 |
+| Web | 3010 |
 
-Nginx terminates HTTP(S) and proxies to those localhost ports — see `infra/deploy/nginx/cbt.conf.example`.
+Override with `CBT_API_PORT` / `CBT_WEB_PORT`. Nginx terminates HTTP(S) and proxies to those localhost ports — see `infra/deploy/nginx/cbt.conf.example`.
 
 ## Database migrations
 

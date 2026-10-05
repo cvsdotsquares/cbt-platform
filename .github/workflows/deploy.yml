@@ -1,4 +1,4 @@
-name: Deploy Production
+name: Deploy
 
 on:
   workflow_run:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-production
+  group: deploy
   cancel-in-progress: false
 
 jobs:
@@ -21,8 +21,6 @@ jobs:
       )
     runs-on: ubuntu-latest
 
-    environment: production
-
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -33,17 +31,17 @@ jobs:
           port: ${{ secrets.DEPLOY_SSH_PORT }}
           script: |
             set -euo pipefail
-            export CBT_APP_ROOT="${{ secrets.DEPLOY_PATH_PRODUCTION }}"
+            export CBT_APP_ROOT="${{ secrets.DEPLOY_PATH }}"
             cd "$CBT_APP_ROOT"
-            bash scripts/deploy/remote-deploy.sh production "${{ github.event.workflow_run.head_sha || github.sha }}"
+            bash scripts/deploy/remote-deploy.sh "${{ github.event.workflow_run.head_sha || github.sha }}"
 
       - name: Smoke check (public API)
         continue-on-error: true
-        env:
-          URL: ${{ vars.PROD_API_HEALTH_URL }}
         run: |
+          URL="${{ vars.API_HEALTH_URL }}"
+          if [ -z "${URL}" ]; then URL="${{ vars.PROD_API_HEALTH_URL }}"; fi
           if [ -z "${URL:-}" ]; then
-            echo "Skipping smoke check (set repo variable PROD_API_HEALTH_URL to enable)"
+            echo "Skipping smoke check (set repo variable API_HEALTH_URL to enable)"
             exit 0
           fi
           for i in $(seq 1 10); do

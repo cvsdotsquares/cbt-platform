@@ -1,37 +1,31 @@
 #!/usr/bin/env bash
 # Non-Docker deploy for CBT Platform on a company Linux server.
 # Usage (from repo root on the server):
-#   ./scripts/deploy/deploy.sh <dev|staging|production>
+#   ./scripts/deploy/deploy.sh
 #
 # Expects env files already present (not in git):
 #   apps/api/.env
 #   apps/web/.env.production   (NEXT_PUBLIC_* used at build time)
 set -euo pipefail
 
-ENV_NAME="${1:-}"
-if [[ -z "$ENV_NAME" || ! "$ENV_NAME" =~ ^(dev|staging|production)$ ]]; then
-  echo "Usage: $0 <dev|staging|production>"
-  exit 1
-fi
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 export CBT_APP_ROOT="$ROOT_DIR"
 
-ECOSYSTEM="infra/deploy/pm2/ecosystem.${ENV_NAME}.cjs"
+ECOSYSTEM="infra/deploy/pm2/ecosystem.cjs"
 if [[ ! -f "$ECOSYSTEM" ]]; then
   echo "ERROR: missing $ECOSYSTEM"
   exit 1
 fi
 
-echo "==> Deploying CBT ($ENV_NAME) from $ROOT_DIR"
+echo "==> Deploying CBT from $ROOT_DIR"
 
 if [[ ! -f apps/api/.env ]]; then
-  echo "ERROR: apps/api/.env missing. Copy infra/deploy/env/api.${ENV_NAME}.env.example → apps/api/.env"
+  echo "ERROR: apps/api/.env missing. Copy infra/deploy/env/api.env.example → apps/api/.env"
   exit 1
 fi
 if [[ ! -f apps/web/.env.production ]]; then
-  echo "ERROR: apps/web/.env.production missing. Copy infra/deploy/env/web.${ENV_NAME}.env.example → apps/web/.env.production"
+  echo "ERROR: apps/web/.env.production missing. Copy infra/deploy/env/web.env.example → apps/web/.env.production"
   exit 1
 fi
 
@@ -71,21 +65,16 @@ else
 fi
 
 echo "==> Smoke check (local)"
-# Default ports from ecosystem files
-case "$ENV_NAME" in
-  dev) API_PORT="${CBT_DEV_API_PORT:-4010}" ;;
-  staging) API_PORT="${CBT_STAGING_API_PORT:-4020}" ;;
-  production) API_PORT="${CBT_PROD_API_PORT:-4030}" ;;
-esac
+API_PORT="${CBT_API_PORT:-4010}"
 
 for i in 1 2 3 4 5 6 7 8 9 10; do
   if curl -sf "http://127.0.0.1:${API_PORT}/api/v1/health" >/dev/null; then
     echo "==> API healthy on :${API_PORT}"
-    echo "==> Deploy complete ($ENV_NAME)"
+    echo "==> Deploy complete"
     exit 0
   fi
   sleep 3
 done
 
-echo "WARNING: API health check did not pass yet — check: pm2 logs cbt-${ENV_NAME}-api"
+echo "WARNING: API health check did not pass yet — check: pm2 logs cbt-api"
 exit 0

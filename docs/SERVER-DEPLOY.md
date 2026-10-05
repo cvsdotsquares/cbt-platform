@@ -1,15 +1,13 @@
 # Company Server Deploy (no Docker)
 
-Placeholder-based CI/CD for **dev / staging / production** on your company Linux server.
+Single-environment CI/CD on your company Linux server.
 
-| Branch | Environment | Default ports (API / Web) | Suggested path |
-|--------|-------------|---------------------------|----------------|
-| `dev` | development | 4010 / 3010 | `/var/www/cbt/dev` |
-| `develop` | staging | 4020 / 3020 | `/var/www/cbt/staging` |
-| `main` | production | 4030 / 3030 | `/var/www/cbt/prod` |
+| Branch | Default ports (API / Web) | Suggested path |
+|--------|---------------------------|----------------|
+| `main` | 4010 / 3010 | `/var/www/cbt/app` |
 
-CI (lint / test / build) still runs from [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).  
-CD workflows SSH into the server and run [`scripts/deploy/remote-deploy.sh`](../scripts/deploy/remote-deploy.sh).
+CI (lint / test / build) runs from [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).  
+After CI succeeds on `main`, [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) SSHs into the server and runs [`scripts/deploy/remote-deploy.sh`](../scripts/deploy/remote-deploy.sh).
 
 ---
 
@@ -33,45 +31,35 @@ sudo npm i -g pm2
 
 # App user (example)
 sudo useradd -m -s /bin/bash cbt || true
-sudo mkdir -p /var/www/cbt/{dev,staging,prod}
+sudo mkdir -p /var/www/cbt/app
 sudo chown -R cbt:cbt /var/www/cbt
 ```
 
-### Postgres databases
+### Postgres database
 
 ```bash
 sudo -u postgres psql <<'SQL'
 CREATE USER cbt_user WITH PASSWORD 'CHANGE_ME_STRONG';
-CREATE DATABASE cbt_dev OWNER cbt_user;
-CREATE DATABASE cbt_staging OWNER cbt_user;
-CREATE DATABASE cbt_prod OWNER cbt_user;
+CREATE DATABASE cbt OWNER cbt_user;
 SQL
 ```
 
-### Clone once per environment
+### Clone the app
 
 ```bash
 sudo -u cbt -i
 cd /var/www/cbt
-git clone git@github.com:YOUR_ORG/cbt-app.git dev
-git clone git@github.com:YOUR_ORG/cbt-app.git staging
-git clone git@github.com:YOUR_ORG/cbt-app.git prod
-
-cd /var/www/cbt/dev && git checkout dev
-cd /var/www/cbt/staging && git checkout develop
-cd /var/www/cbt/prod && git checkout main
+git clone git@github.com:YOUR_ORG/cbt-app.git app
+cd /var/www/cbt/app && git checkout main
 ```
 
 Use a **deploy key** (read-only) or a machine user so the server can `git fetch`.
 
 ### Env files (never commit real values)
 
-For each checkout:
-
 ```bash
-# Dev example
-cp infra/deploy/env/api.dev.env.example apps/api/.env
-cp infra/deploy/env/web.dev.env.example apps/web/.env.production
+cp infra/deploy/env/api.env.example apps/api/.env
+cp infra/deploy/env/web.env.example apps/web/.env.production
 # Edit both files: domains, DATABASE_URL, JWT secrets
 ```
 
@@ -86,20 +74,20 @@ openssl rand -base64 48
 ### Nginx + TLS
 
 ```bash
-sudo cp /var/www/cbt/prod/infra/deploy/nginx/cbt.conf.example /etc/nginx/sites-available/cbt.conf
-# Replace DEV_* / STAGING_* / PROD_* host placeholders
+sudo cp /var/www/cbt/app/infra/deploy/nginx/cbt.conf.example /etc/nginx/sites-available/cbt.conf
+# Replace WEB_HOST / API_HOST placeholders
 sudo ln -sf /etc/nginx/sites-available/cbt.conf /etc/nginx/sites-enabled/cbt.conf
 sudo nginx -t && sudo systemctl reload nginx
 # After DNS points here:
-# sudo certbot --nginx -d PROD_WEB_HOST -d PROD_API_HOST
+# sudo certbot --nginx -d WEB_HOST -d API_HOST
 ```
 
 ### First manual deploy
 
 ```bash
-export CBT_APP_ROOT=/var/www/cbt/staging
+export CBT_APP_ROOT=/var/www/cbt/app
 cd "$CBT_APP_ROOT"
-./scripts/deploy/deploy.sh staging
+./scripts/deploy/deploy.sh
 pm2 startup   # follow the printed systemd command
 pm2 save
 ```
@@ -108,12 +96,7 @@ pm2 save
 
 ## 2. GitHub configuration
 
-### Environments
-
-Create environments: `development`, `staging`, `production`.  
-For **production**, enable **Required reviewers** (manual approval before deploy).
-
-### Secrets (repository or environment)
+### Secrets (repository)
 
 | Secret | Description |
 |--------|-------------|
@@ -121,15 +104,17 @@ For **production**, enable **Required reviewers** (manual approval before deploy
 | `DEPLOY_USER` | SSH user (e.g. `cbt`) |
 | `DEPLOY_SSH_KEY` | Private key content for that user |
 | `DEPLOY_SSH_PORT` | Optional; defaults to 22 if empty |
-| `DEPLOY_PATH_DEV` | e.g. `/var/www/cbt/dev` |
-| `DEPLOY_PATH_STAGING` | e.g. `/var/www/cbt/staging` |
-| `DEPLOY_PATH_PRODUCTION` | e.g. `/var/www/cbt/prod` |
+| `DEPLOY_PATH` | e.g. `/var/www/cbt/app` |
+
+If you previously used `DEPLOY_PATH_PRODUCTION`, rename it to `DEPLOY_PATH`.
 
 ### Variables (optional)
 
 | Variable | Description |
 |----------|-------------|
-| `PROD_API_HEALTH_URL` | e.g. `https://PROD_API_HOST/api/v1/health` |
+| `API_HEALTH_URL` | e.g. `https://API_HOST/api/v1/health` (post-deploy smoke check) |
+
+Legacy name `PROD_API_HEALTH_URL` is still read if `API_HEALTH_URL` is unset.
 
 ### SSH key on server
 
@@ -147,39 +132,31 @@ ssh-keygen -t ed25519 -f cbt-deploy -C "github-actions-cbt"
 ```
 feature/*  → PR → CI
              ↓
-           develop  → auto deploy staging
-             ↓
-            main    → approve → deploy production
-             ↓
-            tags v*  (optional: release notes; prod already tracks main)
+            main  → CI success → auto deploy
 ```
 
-Also: push to `dev` → deploy development.
-
-Manual re-deploy: GitHub Actions → **Deploy Staging** / **Deploy Production** → **Run workflow**.
+Manual re-deploy: GitHub Actions → **Deploy** → **Run workflow**.
 
 ---
 
 ## 4. Rollback
 
 ```bash
-export CBT_APP_ROOT=/var/www/cbt/prod
+export CBT_APP_ROOT=/var/www/cbt/app
 cd "$CBT_APP_ROOT"
 git fetch --tags
-git checkout --force -B deploy/production v1.2.3   # or a previous commit SHA
-./scripts/deploy/deploy.sh production
+git checkout --force -B deploy/main v1.2.3   # or a previous commit SHA
+./scripts/deploy/deploy.sh
 ```
 
-Or re-run an older successful production workflow on the previous commit.
+Or re-run an older successful Deploy workflow on the previous commit.
 
 ---
 
 ## 5. Placeholder checklist (fill when known)
 
 - [ ] `DEPLOY_HOST` / `DEPLOY_USER` / SSH key
-- [ ] Paths: `DEPLOY_PATH_DEV` / `_STAGING` / `_PRODUCTION`
-- [ ] Domains: `DEV_*` `STAGING_*` `PROD_*` web + API
-- [ ] Postgres passwords + 3 databases created
-- [ ] JWT secrets per env (web + api matched)
-- [ ] GitHub Environments + required reviewers on production
-- [ ] Create `dev` / `develop` / `main` branches if missing
+- [ ] `DEPLOY_PATH`
+- [ ] Domains: `WEB_HOST` + `API_HOST`
+- [ ] Postgres password + database created
+- [ ] JWT secrets (web + api matched)

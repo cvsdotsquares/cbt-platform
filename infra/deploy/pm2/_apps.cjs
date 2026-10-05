@@ -1,14 +1,10 @@
-/**
- * Shared PM2 helpers — prefer the per-env files:
- *   ecosystem.dev.cjs | ecosystem.staging.cjs | ecosystem.production.cjs
- */
-function createApps(envName, apiPort, webPort) {
+/** Shared PM2 app definitions — use infra/deploy/pm2/ecosystem.cjs */
+function createApps(apiPort, webPort) {
   const root = process.env.CBT_APP_ROOT || process.cwd();
-  const prefix = `cbt-${envName}`;
 
   return [
     {
-      name: `${prefix}-api`,
+      name: 'cbt-api',
       cwd: root,
       script: 'pnpm',
       args: '--filter @cbt/api start:prod',
@@ -24,7 +20,7 @@ function createApps(envName, apiPort, webPort) {
       },
     },
     {
-      name: `${prefix}-web`,
+      name: 'cbt-web',
       cwd: root,
       script: 'pnpm',
       args: '--filter @cbt/web start',
