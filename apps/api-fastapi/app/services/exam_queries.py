@@ -26,6 +26,7 @@ async def list_exams(
     limit: int = 20,
     search: str = "",
     created_by_id: str | None = None,
+    published_only: bool = False,
 ) -> dict:
     page = max(1, page)
     limit = max(1, min(limit, 100))
@@ -39,6 +40,8 @@ async def list_exams(
     if created_by_id:
         params["created_by_id"] = created_by_id
         filters.append("e.created_by_id = :created_by_id")
+    if published_only:
+        filters.append("e.status IN ('PUBLISHED', 'COMPLETED')")
 
     where_sql = " AND ".join(filters)
     total = int(
@@ -90,7 +93,7 @@ async def list_exams(
     )
     sections_by_exam: dict[str, list] = {}
     for s in sections_result.mappings():
-        sections_by_exam.setdefault(s["exam_id"], []).append(
+        sections_by_exam.setdefault(str(s["exam_id"]), []).append(
             {
                 "id": s["id"],
                 "name": s["name"],
@@ -106,7 +109,12 @@ async def list_exams(
             SELECT e.id AS exam_id,
                    (SELECT COUNT(*) FROM exam_registrations er WHERE er.exam_id = e.id) AS registrations,
                    (SELECT COUNT(*) FROM exam_sessions es WHERE es.exam_id = e.id) AS sessions,
-                   (SELECT COUNT(*) FROM exam_results er2 WHERE er2.exam_id = e.id) AS results
+                   (SELECT COUNT(*) FROM exam_results er2 WHERE er2.exam_id = e.id) AS results,
+                   (SELECT COUNT(*) FROM (
+                        SELECT candidate_id FROM exam_sessions es2 WHERE es2.exam_id = e.id
+                        UNION
+                        SELECT candidate_id FROM exam_results er3 WHERE er3.exam_id = e.id
+                    ) attempted_students) AS attempted_students
             FROM exams e
             WHERE e.id = ANY(:exam_ids)
             """
@@ -114,10 +122,11 @@ async def list_exams(
         {"exam_ids": exam_ids},
     )
     counts_map = {
-        r["exam_id"]: {
+        str(r["exam_id"]): {
             "registrations": int(r["registrations"] or 0),
             "sessions": int(r["sessions"] or 0),
             "results": int(r["results"] or 0),
+            "attemptedStudents": int(r["attempted_students"] or 0),
         }
         for r in counts_result.mappings()
     }
@@ -138,7 +147,7 @@ async def list_exams(
     )
     config_map = {}
     for c in configs_result.mappings():
-        config_map[c["exam_id"]] = {
+        config_map[str(c["exam_id"])] = {
             "batchId": c["batch_id"],
             "subjectId": c["subject_id"],
             "title": c["title"],
@@ -160,7 +169,7 @@ async def list_exams(
 
     items = []
     for exam in exams:
-        eid = exam["id"]
+        eid = str(exam["id"])
         items.append(
             {
                 "id": eid,
@@ -176,7 +185,10 @@ async def list_exams(
                 "createdAt": exam["created_at"].isoformat() if exam["created_at"] else None,
                 "sections": sections_by_exam.get(eid, []),
                 "aiTestConfig": config_map.get(eid),
-                "_count": counts_map.get(eid, {"registrations": 0, "sessions": 0, "results": 0}),
+                "_count": counts_map.get(
+                    eid,
+                    {"registrations": 0, "sessions": 0, "results": 0, "attemptedStudents": 0},
+                ),
             }
         )
 

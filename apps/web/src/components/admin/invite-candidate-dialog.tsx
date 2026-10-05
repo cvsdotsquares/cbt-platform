@@ -43,13 +43,25 @@ export function InviteCandidateDialog({ accessToken, batches = [], classes = [] 
   const [form, setForm] = useState(EMPTY_FORM);
   const [signupUrl, setSignupUrl] = useState('');
 
+  function resetFormForAnotherInvite() {
+    setForm({ ...EMPTY_FORM });
+    setSignupUrl('');
+    setFormKey((k) => k + 1);
+  }
+
   function handleOpenChange(nextOpen: boolean) {
     setOpen(nextOpen);
     if (nextOpen) {
-      setForm({ ...EMPTY_FORM });
-      setSignupUrl('');
-      setFormKey((k) => k + 1);
+      resetFormForAnotherInvite();
     }
+  }
+
+  function handlePrimaryAction() {
+    if (signupUrl) {
+      resetFormForAnotherInvite();
+      return;
+    }
+    inviteMutation.mutate();
   }
 
   const batchesForClass = useMemo(() => {
@@ -76,6 +88,7 @@ export function InviteCandidateDialog({ accessToken, batches = [], classes = [] 
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['candidates'] });
       queryClient.invalidateQueries({ queryKey: ['candidates-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['registration-invites'] });
       setSignupUrl(data.signupUrl);
       toast({ title: 'Invite created', description: 'Share the signup link with the student.', variant: 'success' });
     },
@@ -158,8 +171,8 @@ export function InviteCandidateDialog({ accessToken, batches = [], classes = [] 
         </div>
         <DialogFooter className="gap-2 sm:gap-0">
           <Button
-            onClick={() => inviteMutation.mutate()}
-            disabled={inviteMutation.isPending || !form.email.trim()}
+            onClick={handlePrimaryAction}
+            disabled={inviteMutation.isPending || (!signupUrl && !form.email.trim())}
           >
             {inviteMutation.isPending ? 'Creating…' : signupUrl ? 'Create another' : 'Create invite'}
           </Button>

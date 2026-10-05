@@ -8,6 +8,7 @@ import {
   ADMIN_FLAG_COOKIE,
   accessCookieOptions,
   refreshCookieOptions,
+  authFlagCookieOptions,
   clearCookieOptions,
   verifyAccessToken,
 } from '@/lib/auth-cookies';
@@ -56,6 +57,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
   const accessToken = typeof body.accessToken === 'string' ? body.accessToken : '';
   const refreshToken = typeof body.refreshToken === 'string' ? body.refreshToken : '';
+  const rememberMe = body.rememberMe === true;
 
   if (!accessToken || !refreshToken) {
     return NextResponse.json({ error: 'Missing tokens' }, { status: 400 });
@@ -77,9 +79,9 @@ export async function POST(request: Request) {
 
   const res = NextResponse.json({ ok: true, isAdmin: admin });
   res.cookies.set(ACCESS_TOKEN_COOKIE, accessToken, accessCookieOptions());
-  res.cookies.set(REFRESH_TOKEN_COOKIE, refreshToken, refreshCookieOptions());
-  res.cookies.set(AUTH_FLAG_COOKIE, '1', refreshCookieOptions());
-  res.cookies.set(ADMIN_FLAG_COOKIE, admin ? '1' : '0', refreshCookieOptions());
+  res.cookies.set(REFRESH_TOKEN_COOKIE, refreshToken, refreshCookieOptions(rememberMe));
+  res.cookies.set(AUTH_FLAG_COOKIE, '1', authFlagCookieOptions(rememberMe));
+  res.cookies.set(ADMIN_FLAG_COOKIE, admin ? '1' : '0', authFlagCookieOptions(rememberMe));
   return res;
 }
 

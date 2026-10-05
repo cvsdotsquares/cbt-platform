@@ -1,7 +1,7 @@
 """Institute role permission matrix stored on the tenant.
 
 Defaults come from ROLE_PERMISSIONS. A super admin can replace the catalog
-portion for Teacher and Institute Admin. Permissions outside the catalog stay
+portion for Teacher. Permissions outside the catalog stay
 on their built-in defaults so a save cannot strip hidden access.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ from app.models.user import User
 
 SETTINGS_KEY = "rolePermissions"
 TEACHER_SETTINGS_KEY = "teacherPermissions"
+INSTITUTE_ADMIN_ROLE_ENABLED = False
 
 CONFIGURABLE_ROLES: list[dict[str, str]] = [
     {
@@ -25,11 +26,11 @@ CONFIGURABLE_ROLES: list[dict[str, str]] = [
         "label": "Teacher",
         "description": "What a class teacher can open, create, and change.",
     },
-    {
-        "name": "INSTITUTE_ADMIN",
-        "label": "Institute Admin",
-        "description": "What institute staff can open, create, and change.",
-    },
+    # {
+    #     "name": "INSTITUTE_ADMIN",
+    #     "label": "Institute Admin",
+    #     "description": "What institute staff can open, create, and change.",
+    # },
 ]
 
 # Column order matches a role-permissions grid: view and create first.
@@ -333,6 +334,8 @@ async def load_overrides(db: AsyncSession, tenant_id: str) -> dict[str, list[str
     for role_name, codes in raw.items():
         key = str(role_name).upper()
         if key not in CONFIGURABLE_ROLE_NAMES or not isinstance(codes, list):
+            continue
+        if not INSTITUTE_ADMIN_ROLE_ENABLED and key == "INSTITUTE_ADMIN":
             continue
         overrides[key] = [str(code) for code in codes if str(code) in CATALOG_CODES]
     return overrides

@@ -36,6 +36,20 @@ class AcademicClass(Base):
     )
 
 
+class TenantOfferedSubject(Base):
+    """Subjects a tenant offers for a given academic class (grade)."""
+
+    __tablename__ = "tenant_offered_subjects"
+
+    id: Mapped[str] = mapped_column(UuidStr, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(UuidStr, nullable=False)
+    academic_class_id: Mapped[str] = mapped_column(
+        UuidStr, ForeignKey("academic_classes.id"), nullable=False
+    )
+    subject_id: Mapped[str] = mapped_column(UuidStr, ForeignKey("subjects.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Subject(Base):
     __tablename__ = "subjects"
 
@@ -151,6 +165,9 @@ class SyllabusProgress(Base):
     batch_id: Mapped[str] = mapped_column(UuidStr, ForeignKey("batches.id"), nullable=False)
     chapter_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("chapters.id"), nullable=True)
     topic_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("syllabus_topics.id"), nullable=True)
+    material_id: Mapped[str | None] = mapped_column(
+        UuidStr, ForeignKey("study_materials.id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(SyllabusProgressStatusEnum, nullable=False, default="NOT_STARTED")
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_by_id: Mapped[str | None] = mapped_column(UuidStr, nullable=True)

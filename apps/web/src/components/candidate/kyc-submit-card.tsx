@@ -99,7 +99,7 @@ export function KycSubmitCard({ accessToken, kycStatus, kycDocument }: KycSubmit
     if (!file) return;
     if (file.size > 3 * 1024 * 1024) {
       e.target.value = '';
-      toast({ title: 'File too large', description: 'Maximum size is 3MB.', variant: 'destructive' });
+      toast({ title: 'File too large.', description: 'Maximum size is 3MB.', variant: 'destructive' });
       return;
     }
     const reader = new FileReader();

@@ -145,7 +145,52 @@ async def _completed_chapter_ids(db: AsyncSession, batch_id: str) -> set[str]:
         ),
         {"batch_id": str(batch_id)},
     )
-    return {row[0] for row in rows.all()}
+    completed = {row[0] for row in rows.all() if row[0]}
+
+    note_rows = await db.execute(
+        text(
+            """
+            SELECT sm.chapter_id::text, sm.book_id::text, sm.id::text
+            FROM syllabus_progress sp
+            JOIN study_materials sm ON sm.id = sp.material_id
+            WHERE sp.batch_id::text = :batch_id
+              AND sp.status = 'COMPLETED'
+              AND sp.material_id IS NOT NULL
+            """
+        ),
+        {"batch_id": str(batch_id)},
+    )
+    for chapter_id, book_id, material_id in note_rows.all():
+        if chapter_id:
+            completed.add(str(chapter_id))
+            continue
+        if book_id:
+            book_chapters = await db.execute(
+                text(
+                    """
+                    SELECT c.id::text
+                    FROM chapters c
+                    WHERE c.book_id::text = :book_id
+                    """
+                ),
+                {"book_id": str(book_id)},
+            )
+            completed.update(str(row[0]) for row in book_chapters.all())
+            continue
+        chunk_chapters = await db.execute(
+            text(
+                """
+                SELECT DISTINCT dc.chapter_id::text
+                FROM document_chunks dc
+                WHERE dc.material_id::text = :material_id
+                  AND dc.chapter_id IS NOT NULL
+                """
+            ),
+            {"material_id": str(material_id)},
+        )
+        completed.update(str(row[0]) for row in chunk_chapters.all() if row[0])
+
+    return completed
 
 
 async def _resolve_chapter_ids(
@@ -1184,8 +1229,9 @@ async def _generate_reference_answer_payload(
         ]
         user_prompt["variation_hint"] = random.randint(1, 1_000_000)
         user_prompt["rules"].append(
-            "Regenerate mode: invent four brand-new option texts from the question and syllabus only. "
-            "Do not reuse any forbidden_option_texts verbatim or with minor edits."
+            "Regenerate mode: produce four distinct option texts grounded in the question. "
+            "Change wording or distractors where possible; reuse of individual forbidden_option_texts "
+            "is allowed when the question has a narrow factual answer (e.g. numeric keys)."
         )
     elif is_choice and previous_options and not regenerate:
         user_prompt["existing_options"] = previous_options
@@ -1216,18 +1262,13 @@ async def _generate_reference_answer_payload(
             continue
         if not regenerate:
             break
-        if not _options_unchanged(previous_options, normalized_options) and not _options_reuse_previous(
-            previous_options, normalized_options
-        ):
+        if not _options_unchanged(previous_options, normalized_options):
             break
 
     if is_choice:
         if set(normalized_options) != set("abcd"):
             raise HTTPException(status_code=502, detail="AI returned incomplete multiple-choice options")
-        if regenerate and previous_options and (
-            _options_unchanged(previous_options, normalized_options)
-            or _options_reuse_previous(previous_options, normalized_options)
-        ):
+        if regenerate and previous_options and _options_unchanged(previous_options, normalized_options):
             raise HTTPException(
                 status_code=502,
                 detail=(
@@ -1557,6 +1598,7 @@ async def create_ai_test(
                 "combinedSubjects": True,
                 "batchId": body.batch_id,
                 "shuffleQuestions": body.shuffle_questions,
+                "subjectScopeLabel": "All subjects",
             },
             [s["name"] for s, _ids in resolved_subjects],
             now,
@@ -1707,6 +1749,7 @@ async def create_ai_test(
         {
             "aiGenerated": True,
             "subjectId": body.subject_id,
+            "subjectName": subject["name"],
             "chapterIds": chapter_ids,
             "shuffleQuestions": body.shuffle_questions,
         },

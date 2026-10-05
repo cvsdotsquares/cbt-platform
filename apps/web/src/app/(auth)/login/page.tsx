@@ -25,6 +25,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -76,8 +77,13 @@ export default function LoginPage() {
       }
       if (result.accessToken && result.refreshToken && result.user) {
         const roles = normalizeRoles(result.user.roles);
-        const isAdminUser = await setAuth({ ...result.user, roles } as never, result.accessToken, result.refreshToken);
-        redirectAfterLogin(isAdminUser, redirectTo);
+        await setAuth(
+          { ...result.user, roles } as never,
+          result.accessToken,
+          result.refreshToken,
+          { rememberMe },
+        );
+        redirectAfterLogin(roles, redirectTo);
         return;
       }
       setError('Login failed. Please try again.');
@@ -145,6 +151,18 @@ export default function LoginPage() {
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              id="remember-me"
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              className="h-4 w-4 rounded border-input accent-primary"
+            />
+            <Label htmlFor="remember-me" className="cursor-pointer text-sm font-normal text-muted-foreground">
+              Remember me on this device
+            </Label>
           </div>
           <Button type="submit" className="w-full shadow-sm" size="lg" disabled={loading}>
             {loading ? 'Signing in…' : 'Sign in'}

@@ -124,8 +124,8 @@ function RegisterForm() {
         throw new Error('Account created, but sign-in failed. Please sign in manually.');
       }
       const roles = normalizeRoles(result.user.roles);
-      const isAdminUser = await setAuth({ ...result.user, roles } as never, result.accessToken, result.refreshToken);
-      redirectAfterLogin(isAdminUser);
+      await setAuth({ ...result.user, roles } as never, result.accessToken, result.refreshToken);
+      redirectAfterLogin(roles);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to create student';
       const normalized = message.toLowerCase();

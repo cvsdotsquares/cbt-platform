@@ -33,6 +33,13 @@ export function hexToHslChannels(hex: string): string | null {
   return `${Math.round(h * 360)} ${Math.round(s * 100)}% ${Math.round(l * 100)}%`;
 }
 
+function primaryLightness(hex: string): number | null {
+  const channels = hexToHslChannels(hex);
+  if (!channels) return null;
+  const match = /(\d+)\s+(\d+)%\s+(\d+)%/.exec(channels);
+  return match ? Number(match[3]) : null;
+}
+
 /** Apply tenant primary color to document CSS variables used by the UI. */
 export function applyTenantPrimaryColor(hex?: string | null) {
   if (typeof document === 'undefined' || !hex) return;
@@ -40,10 +47,13 @@ export function applyTenantPrimaryColor(hex?: string | null) {
   const channels = hexToHslChannels(hex);
   if (!channels) return;
 
+  const lightness = primaryLightness(hex);
+  const onPrimary = lightness !== null && lightness >= 88 ? '222 47% 11%' : '0 0% 100%';
+
   const root = document.documentElement;
   root.style.setProperty('--primary', channels);
+  root.style.setProperty('--primary-foreground', onPrimary);
   root.style.setProperty('--ring', channels);
   root.style.setProperty('--sidebar-accent', channels);
   root.style.setProperty('--gradient-start', channels);
-  root.style.setProperty('--accent-foreground', channels);
 }

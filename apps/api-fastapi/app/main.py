@@ -1,6 +1,15 @@
 import asyncio
 import contextlib
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+)
+logging.getLogger("app.services.material_indexing").setLevel(logging.INFO)
 
 # Psycopg async requires SelectorEventLoop on Windows (Python 3.14+ defaults to Proactor).
 if sys.platform == "win32":
@@ -16,7 +25,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import dispose_engine
-from app.services.material_indexing import indexing_watchdog_loop, resume_stuck_indexing_jobs
+from app.services.material_indexing import (
+    indexing_watchdog_loop,
+    resync_full_book_syllabi_from_text,
+    resume_stuck_indexing_jobs,
+)
+from app.services.material_storage import pymupdf_available
 from app.routers import auth, exam, role, user, tenant, permission, role_permission, role_matrix, question, health, stubs, curriculum, batches, materials, candidates, ai, analytics, onboarding, results, learning, exam_sessions, proctoring
 from app.middleware import RequestIDMiddleware, ResponseEnvelopeMiddleware
 
@@ -26,16 +40,45 @@ from app.middleware import RequestIDMiddleware, ResponseEnvelopeMiddleware
 # ============================================================
 
 
+async def _deferred_resume_stuck_indexing() -> None:
+    """Resume stuck jobs after startup so health checks and first requests are not starved."""
+    try:
+        await asyncio.sleep(0.25)
+        await resume_stuck_indexing_jobs()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Deferred resume of stuck material indexing failed")
+
+
+async def _background_full_book_syllabus_resync() -> None:
+    try:
+        # Let fresh uploads index first; resync re-reads every full-book PDF.
+        await asyncio.sleep(600)
+        await resync_full_book_syllabi_from_text()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Background full-book syllabus resync failed")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await resume_stuck_indexing_jobs()
+    if not pymupdf_available():
+        logger.warning(
+            "PyMuPDF is not installed — PDF indexing will use slow pypdf fallback. "
+            "Run: pip install pymupdf"
+        )
+    resume_task = asyncio.create_task(_deferred_resume_stuck_indexing())
+    resync_task = asyncio.create_task(_background_full_book_syllabus_resync())
     watchdog = asyncio.create_task(indexing_watchdog_loop())
     try:
         yield
     finally:
-        watchdog.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await watchdog
+        for task in (resume_task, resync_task, watchdog):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         with contextlib.suppress(Exception):
             await dispose_engine()
 

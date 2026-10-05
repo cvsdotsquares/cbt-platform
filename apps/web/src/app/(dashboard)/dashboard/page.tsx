@@ -26,9 +26,10 @@ import {
 } from '@/components/proctoring/violation-detail-dialog';
 import { ScrollableListPanel } from '@/components/layout/horizontal-tab-scroller';
 import { useRequireAuth } from '@/hooks/use-auth';
+import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
 import { usePermissions } from '@/hooks/use-permissions';
-import { normalizeRoles } from '@/lib/roles';
+import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
 import { Permission } from '@cbt/shared';
 import { StatCard } from '@/components/layout/stat-card';
 import { WelcomeBannerGlassWaves } from '@/components/layout/welcome-banner-glass-waves';
@@ -202,7 +203,7 @@ function roleSubtitle(roles: string[]) {
   if (roles.includes('TEACHER')) {
     return 'Create NCERT-aligned tests, track class progress, and review student performance — all in one place.';
   }
-  if (roles.includes('INSTITUTE_ADMIN') || roles.includes('ORG_ADMIN')) {
+  if (roles.includes('ORG_ADMIN')) {
     return 'Your institute hub for classes, study material, AI-generated tests, and student results.';
   }
   return 'Run structured assessments for Classes 9–12 with AI-powered question generation from your books.';
@@ -549,11 +550,17 @@ function WeekStrip({
 
 export default function DashboardPage() {
   const { accessToken } = useRequireAuth(true);
+  const router = useRouter();
   const queryClient = useQueryClient();
   const { user } = useAuthStore();
   const { can } = usePermissions();
   const [violationTab, setViolationTab] = useState<'active' | 'cleared'>('active');
   const roles = normalizeRoles(user?.roles);
+  const teacherPortal = isTeacherOnly(roles);
+
+  useEffect(() => {
+    if (teacherPortal) router.replace('/dashboard/teacher');
+  }, [teacherPortal, router]);
   const [weekAnchor, setWeekAnchor] = useState(() => dateKey(new Date()));
   const [dateFilter, setDateFilter] = useState<string | null>(() => dateKey(new Date()));
   const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('upcoming');
@@ -563,7 +570,7 @@ export default function DashboardPage() {
   const { data } = useQuery({
     queryKey: ['dashboard'],
     queryFn: () => dashboardApi.stats(accessToken!) as Promise<DashboardData>,
-    enabled: !!accessToken,
+    enabled: !!accessToken && !teacherPortal,
     staleTime: 10_000,
     refetchInterval: 15_000,
     refetchIntervalInBackground: false,
@@ -643,6 +650,8 @@ export default function DashboardPage() {
     if (h < 17) return 'Good Afternoon';
     return 'Good Evening';
   })();
+
+  if (teacherPortal) return null;
 
   return (
     <div className="space-y-6">

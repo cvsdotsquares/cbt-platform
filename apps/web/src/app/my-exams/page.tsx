@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useMemo, useState, useRef } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,6 +34,13 @@ import {
 } from 'lucide-react';
 import { TableSkeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { displayChapterTitle } from '@/lib/chapter-title';
+import {
+  STUDENT_LEARNING_QUERY_KEY,
+  STUDENT_SYLLABUS_POLL_MS,
+  STUDENT_SYLLABUS_TAB,
+} from '@/lib/student-syllabus-poll';
+import { classTestSubjectLabel } from '@/lib/class-test-subject-label';
 
 type ExamRegistration = {
   id: string;
@@ -41,7 +48,12 @@ type ExamRegistration = {
   exam: {
     title: string; code: string; status: string;
     startTime: string; endTime: string; timezone?: string;
-    settings?: { durationMinutes: number; maxAttempts?: number; passingScore?: number };
+    settings?: {
+      durationMinutes: number; maxAttempts?: number; passingScore?: number;
+      combinedSubjects?: boolean; subjectId?: string;
+    };
+    sections?: { name?: string | null }[];
+    aiTestConfig?: { subjectId?: string | null } | null;
   };
   sessions?: { status: string }[];
   submittedAttemptCount?: number;
@@ -116,6 +128,7 @@ export default function MyExamsPage() {
   const [syllabusChapterSearch, setSyllabusChapterSearch] = useState('');
   const initials = `${user?.firstName?.[0] || ''}${user?.lastName?.[0] || ''}`.toUpperCase();
   const now = useNow(15_000);
+  const queryClient = useQueryClient();
 
   const { data: exams, isLoading: examsLoading } = useQuery({
     queryKey: ['my-exams'],
@@ -142,7 +155,7 @@ export default function MyExamsPage() {
   });
 
   const { data: learning, isLoading: learningLoading, isError: learningError } = useQuery({
-    queryKey: ['student-learning'],
+    queryKey: STUDENT_LEARNING_QUERY_KEY,
     queryFn: () => learningApi.studentDashboard(accessToken!) as Promise<{
       batches: { name: string; academicClass: { name: string } }[];
       stats: {
@@ -177,7 +190,16 @@ export default function MyExamsPage() {
       }[];
     }>,
     enabled: ready && isCandidateUser && !!accessToken,
+    refetchInterval: tab === STUDENT_SYLLABUS_TAB ? STUDENT_SYLLABUS_POLL_MS : 15_000,
+    refetchIntervalInBackground: tab === STUDENT_SYLLABUS_TAB,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   });
+
+  useEffect(() => {
+    if (tab !== STUDENT_SYLLABUS_TAB || !ready || !isCandidateUser || !accessToken) return;
+    void queryClient.refetchQueries({ queryKey: STUDENT_LEARNING_QUERY_KEY });
+  }, [tab, ready, isCandidateUser, accessToken, queryClient]);
 
   const examList = ((exams as ExamRegistration[]) || []).filter(
     (reg) => reg.exam && CANDIDATE_VISIBLE_EXAM_STATUSES.has(reg.exam.status),
@@ -185,13 +207,19 @@ export default function MyExamsPage() {
   const resultList = (results as { items?: {
     id: string; totalScore: number; maxScore: number; percentage: number;
     rank?: number | null; percentile?: number | null; totalCandidates?: number | null;
-    published: boolean; exam: { title: string; code: string; settings?: { passingScore?: number } };
+    published: boolean; exam: {
+      title: string; code: string;
+      settings?: { passingScore?: number; combinedSubjects?: boolean; subjectId?: string };
+      sections?: { name?: string | null }[];
+      aiTestConfig?: { subjectId?: string | null } | null;
+    };
   }[] })?.items || [];
 
   const filteredExams = examList.filter((reg) => {
     if (!search) return true;
     const q = search.toLowerCase();
-    return reg.exam.title.toLowerCase().includes(q) || reg.exam.code.toLowerCase().includes(q);
+    const subjectLabel = classTestSubjectLabel(reg.exam).toLowerCase();
+    return reg.exam.title.toLowerCase().includes(q) || subjectLabel.includes(q);
   });
 
   const syllabusBatches = useMemo(
@@ -228,7 +256,7 @@ export default function MyExamsPage() {
       setAdmitCard(card);
     } catch (e) {
       toast({
-        title: 'Admit card unavailable',
+        title: 'Admit card unavailable.',
         description: e instanceof Error ? e.message : 'Could not load admit card for this exam.',
         variant: 'destructive',
       });
@@ -249,7 +277,7 @@ export default function MyExamsPage() {
     } catch (e) {
       if (certificateRequestId.current !== requestId) return;
       toast({
-        title: 'Certificate unavailable',
+        title: 'Certificate unavailable.',
         description: e instanceof Error ? e.message : 'Results must be published before downloading a certificate.',
         variant: 'destructive',
       });
@@ -444,7 +472,7 @@ export default function MyExamsPage() {
                                     </Badge>
                                   )}
                                 </div>
-                                <p className="text-sm text-muted-foreground">{reg.exam.code}</p>
+                                <p className="text-sm text-muted-foreground">{classTestSubjectLabel(reg.exam)}</p>
                                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                                   <span className="flex items-center gap-1.5">
                                     <Clock className="h-3 w-3" />
@@ -516,7 +544,7 @@ export default function MyExamsPage() {
                             </div>
                             <div>
                               <p className="font-bold">{r.exam.title}</p>
-                              <p className="text-sm text-muted-foreground">{r.exam.code}</p>
+                              <p className="text-sm text-muted-foreground">{classTestSubjectLabel(r.exam)}</p>
                               {rankLabel && (
                                 <p className="mt-1 text-xs font-semibold text-primary">{rankLabel}</p>
                               )}
@@ -777,7 +805,7 @@ export default function MyExamsPage() {
                                             </span>
                                             <div className="min-w-0 flex-1">
                                               <p className="text-sm font-medium leading-snug text-foreground">
-                                                {ch.title}
+                                                {displayChapterTitle(ch.title)}
                                               </p>
                                             </div>
                                             <span className="hidden shrink-0 items-center gap-1.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400 sm:inline-flex">

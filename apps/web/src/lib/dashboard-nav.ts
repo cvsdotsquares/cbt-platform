@@ -1,4 +1,5 @@
-import { Permission } from '@cbt/shared';
+import { Permission, getPermissionsForRoles } from '@cbt/shared';
+import { isAdmin, isTeacherOnly, normalizeRoles } from '@/lib/roles';
 
 export interface DashboardRoute {
   path: string;
@@ -42,12 +43,9 @@ export function getDefaultDashboardPath(
   can: (permission: Permission | string) => boolean,
   roles?: string[],
 ): string {
-  // Pure teachers land on the simplified teacher hub
-  if (
-    roles?.includes('TEACHER')
-    && !roles.some((r) => ['SUPER_ADMIN', 'ORG_ADMIN', 'INSTITUTE_ADMIN', 'EXAM_MANAGER'].includes(r))
-  ) {
-    if (can(Permission.LEARNING_MANAGE)) return '/dashboard/teacher';
+  // Teacher portal (including Institute Admin while that role is disabled)
+  if (roles && isTeacherOnly(roles) && can(Permission.LEARNING_MANAGE)) {
+    return '/dashboard/teacher';
   }
 
   // Narrow staff roles without dashboard home access
@@ -65,4 +63,13 @@ export function getDefaultDashboardPath(
     if (can(route.permission)) return route.path;
   }
   return '/my-exams';
+}
+
+/** Staff landing route after login (respects teacher portal vs institute home). */
+export function getPostLoginPath(roles: unknown) {
+  const normalized = normalizeRoles(roles);
+  if (!isAdmin(normalized)) return '/my-exams';
+  const permissions = getPermissionsForRoles(normalized as never);
+  const can = (p: Permission | string) => permissions.includes(p as never);
+  return getDefaultDashboardPath(can, normalized);
 }

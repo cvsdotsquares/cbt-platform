@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
 from app.services.proctoring_service import get_event_detail
+from app.services.teacher_scope import get_teacher_batch_ids, is_teacher_scoped
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -42,6 +43,31 @@ def _iso(value: Any) -> str | None:
     return str(value)
 
 
+async def _dashboard_scope(
+    db: AsyncSession, user: User
+) -> tuple[dict[str, Any], str, str, str]:
+    """SQL fragments and bind params for teacher-scoped dashboard metrics."""
+    params: dict[str, Any] = {"tenant_id": user.tenant_id}
+    if not is_teacher_scoped(user):
+        return params, "", "", ""
+
+    params["user_id"] = str(user.id)
+    exam_own = " AND created_by_id = :user_id"
+    exam_e_own = " AND e.created_by_id = :user_id"
+    teacher_batch_ids = await get_teacher_batch_ids(db, str(user.id))
+    params["teacher_batch_ids"] = teacher_batch_ids
+    if teacher_batch_ids:
+        cand_in_batches = """
+              AND EXISTS (
+                SELECT 1 FROM batch_enrollments be
+                WHERE be.candidate_id = c.id AND be.batch_id::text = ANY(:teacher_batch_ids)
+              )
+        """
+    else:
+        cand_in_batches = " AND FALSE"
+    return params, exam_own, exam_e_own, cand_in_batches
+
+
 def _rows(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -55,39 +81,63 @@ def _rows(value: Any) -> list[dict[str, Any]]:
     return []
 
 
-@router.get("/violations/{event_id}")
-async def violation_detail(
-    event_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Violation drill-down for dashboard integrity alerts (same tenant scope as dashboard)."""
-    data = await get_event_detail(db, event_id, str(current_user.tenant_id))
-    if data is None:
-        raise HTTPException(status_code=404, detail="Violation not found")
-    return data
-
-
 @router.get("/dashboard")
 async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    tenant_id = current_user.tenant_id
+    params, exam_own, exam_e_own, cand_in_batches = await _dashboard_scope(db, current_user)
+    cand_count_filter = cand_in_batches.replace("c.id", "c2.id") if cand_in_batches else ""
+    candidate_count_sql = (
+        f"""
+              (SELECT COUNT(DISTINCT c2.id) FROM candidates c2
+               WHERE c2.tenant_id = :tenant_id{cand_count_filter})
+        """
+        if cand_in_batches
+        else "(SELECT COUNT(*) FROM candidates WHERE tenant_id = :tenant_id)"
+    )
+    question_count_sql = (
+        "(SELECT COUNT(*) FROM questions WHERE tenant_id = :tenant_id AND created_by_id = :user_id)"
+        if exam_own
+        else "(SELECT COUNT(*) FROM questions WHERE tenant_id = :tenant_id)"
+    )
+    teacher_assignments_sql = (
+        """
+              (
+                SELECT COALESCE(json_agg(t), '[]'::json)
+                FROM (
+                  SELECT ta.id, ta.assigned_at,
+                         s.name AS subject_name,
+                         b.name AS batch_name,
+                         ac.name AS class_name,
+                         ac.level AS class_level
+                  FROM teacher_assignments ta
+                  JOIN batches b ON b.id = ta.batch_id
+                  JOIN academic_classes ac ON ac.id = b.academic_class_id
+                  JOIN subjects s ON s.id = ta.subject_id
+                  WHERE ta.user_id = :user_id
+                  ORDER BY ta.assigned_at DESC
+                  LIMIT 10
+                ) t
+              ) AS teacher_assignments
+        """
+        if exam_own
+        else "('[]'::json) AS teacher_assignments"
+    )
 
     result = await db.execute(
         text(
-            """
+            f"""
             SELECT
-              (SELECT COUNT(*) FROM exams WHERE tenant_id = :tenant_id) AS total_exams,
-              (SELECT COUNT(*) FROM exams WHERE tenant_id = :tenant_id AND status = 'PUBLISHED') AS published_exams,
-              (SELECT COUNT(*) FROM candidates WHERE tenant_id = :tenant_id) AS total_candidates,
-              (SELECT COUNT(*) FROM questions WHERE tenant_id = :tenant_id) AS total_questions,
+              (SELECT COUNT(*) FROM exams WHERE tenant_id = :tenant_id{exam_own}) AS total_exams,
+              (SELECT COUNT(*) FROM exams WHERE tenant_id = :tenant_id AND status = 'PUBLISHED'{exam_own}) AS published_exams,
+              {candidate_count_sql} AS total_candidates,
+              {question_count_sql} AS total_questions,
               (
                 SELECT COUNT(*)
                 FROM exam_sessions es
                 JOIN exams e ON e.id = es.exam_id
-                WHERE es.status = 'IN_PROGRESS' AND e.tenant_id = :tenant_id
+                WHERE es.status = 'IN_PROGRESS' AND e.tenant_id = :tenant_id{exam_e_own}
               ) AS active_sessions,
               (
                 SELECT COUNT(*)
@@ -95,7 +145,7 @@ async def dashboard_stats(
                 JOIN exam_sessions es ON es.id = pe.session_id
                 JOIN exams e ON e.id = es.exam_id
                 WHERE pe.severity IN ('HIGH', 'CRITICAL')
-                  AND e.tenant_id = :tenant_id
+                  AND e.tenant_id = :tenant_id{exam_e_own}
                   AND NOT COALESCE((pe.metadata->>'dismissed')::boolean, false)
               ) AS violation_alerts,
               (
@@ -104,7 +154,7 @@ async def dashboard_stats(
                   SELECT e.id, e.title, e.code, e.start_time, e.end_time, e.timezone,
                          (SELECT COUNT(*) FROM exam_registrations er WHERE er.exam_id = e.id) AS registrations
                   FROM exams e
-                  WHERE e.tenant_id = :tenant_id
+                  WHERE e.tenant_id = :tenant_id{exam_e_own}
                     AND e.status IN ('PUBLISHED', 'SCHEDULED')
                     AND e.end_time >= NOW()
                   ORDER BY e.start_time ASC
@@ -117,7 +167,7 @@ async def dashboard_stats(
                                     SELECT e.id, e.title, e.code, e.start_time, e.end_time, e.timezone,
                                                  (SELECT COUNT(*) FROM exam_registrations er WHERE er.exam_id = e.id) AS registrations
                                     FROM exams e
-                                    WHERE e.tenant_id = :tenant_id
+                                    WHERE e.tenant_id = :tenant_id{exam_e_own}
                                         AND e.status IN ('PUBLISHED', 'SCHEDULED')
                                         AND e.end_time < NOW()
                                     ORDER BY e.start_time DESC
@@ -130,7 +180,7 @@ async def dashboard_stats(
                   SELECT e.id, e.title, e.code, e.status, e.start_time, e.end_time, e.timezone,
                          (SELECT COUNT(*) FROM exam_registrations er WHERE er.exam_id = e.id) AS registrations
                   FROM exams e
-                  WHERE e.tenant_id = :tenant_id
+                  WHERE e.tenant_id = :tenant_id{exam_e_own}
                     AND e.status IN ('DRAFT', 'PUBLISHED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED')
                     AND e.start_time >= (NOW() - INTERVAL '120 days')
                   ORDER BY e.start_time ASC
@@ -147,7 +197,7 @@ async def dashboard_stats(
                   JOIN exams e ON e.id = er.exam_id
                   JOIN candidates c ON c.id = er.candidate_id
                   JOIN users u ON u.id = c.user_id
-                  WHERE e.tenant_id = :tenant_id
+                  WHERE e.tenant_id = :tenant_id{exam_e_own}
                   ORDER BY er.created_at DESC
                   LIMIT 20
                 ) t
@@ -163,7 +213,7 @@ async def dashboard_stats(
                   JOIN exams e ON e.id = es.exam_id
                   JOIN candidates c ON c.id = es.candidate_id
                   JOIN users u ON u.id = c.user_id
-                  WHERE e.tenant_id = :tenant_id
+                  WHERE e.tenant_id = :tenant_id{exam_e_own}
                     AND pe.severity IN ('HIGH', 'CRITICAL')
                     AND NOT COALESCE((pe.metadata->>'dismissed')::boolean, false)
                   ORDER BY pe.occurred_at DESC
@@ -181,7 +231,7 @@ async def dashboard_stats(
                   JOIN exams e ON e.id = es.exam_id
                   JOIN candidates c ON c.id = es.candidate_id
                   JOIN users u ON u.id = c.user_id
-                  WHERE e.tenant_id = :tenant_id
+                  WHERE e.tenant_id = :tenant_id{exam_e_own}
                     AND COALESCE((pe.metadata->>'dismissed')::boolean, false)
                   ORDER BY pe.occurred_at DESC
                   LIMIT 20
@@ -195,7 +245,7 @@ async def dashboard_stats(
                          u.first_name, u.last_name, u.email
                   FROM candidates c
                   JOIN users u ON u.id = c.user_id
-                  WHERE c.tenant_id = :tenant_id
+                  WHERE c.tenant_id = :tenant_id{cand_in_batches}
                     AND c.kyc_status IN ('PENDING', 'VERIFIED')
                     AND COALESCE(c.profile_data->>'submittedAt', '') <> ''
                     AND c.updated_at > NOW() - INTERVAL '2 days'
@@ -223,7 +273,7 @@ async def dashboard_stats(
                   ) primary_be ON true
                   LEFT JOIN batches b ON b.id = primary_be.batch_id
                   LEFT JOIN academic_classes ac ON ac.id = b.academic_class_id
-                  WHERE c.tenant_id = :tenant_id
+                  WHERE c.tenant_id = :tenant_id{cand_in_batches}
                   ORDER BY c.created_at DESC
                   LIMIT 5
                 ) t
@@ -233,14 +283,15 @@ async def dashboard_stats(
                 FROM (
                   SELECT e.id, e.title, e.code, e.status, e.created_at
                   FROM exams e
-                  WHERE e.tenant_id = :tenant_id
+                  WHERE e.tenant_id = :tenant_id{exam_e_own}
                   ORDER BY e.created_at DESC
                   LIMIT 5
                 ) t
-              ) AS tests_created
+              ) AS tests_created,
+              {teacher_assignments_sql}
             """
         ),
-        {"tenant_id": tenant_id},
+        params,
     )
     row = result.mappings().first() or {}
 
@@ -253,6 +304,7 @@ async def dashboard_stats(
     kyc_pending = _rows(row.get("kyc_pending"))
     new_students = _rows(row.get("new_students"))
     tests_created = _rows(row.get("tests_created"))
+    teacher_assignments = _rows(row.get("teacher_assignments"))
 
     recent_violations_out: list[dict[str, Any]] = []
     for r in violations:
@@ -388,6 +440,17 @@ async def dashboard_stats(
                 }
                 for r in tests_created
             ],
+            "teacherAssignments": [
+                {
+                    "id": r["id"],
+                    "subjectName": r.get("subject_name"),
+                    "batchName": r.get("batch_name"),
+                    "className": r.get("class_name"),
+                    "classLevel": int(r["class_level"]) if r.get("class_level") is not None else None,
+                    "assignedAt": _iso(r.get("assigned_at")),
+                }
+                for r in teacher_assignments
+            ],
         },
     }
 
@@ -438,10 +501,12 @@ async def dashboard_submissions_for_day(
     if end <= start:
         raise HTTPException(status_code=400, detail="'to' must be after 'from'")
 
-    tenant_id = current_user.tenant_id
+    params, _exam_own, exam_e_own, _cand = await _dashboard_scope(db, current_user)
+    params["start_at"] = start
+    params["end_at"] = end
     result = await db.execute(
         text(
-            """
+            f"""
             SELECT er.id, er.total_score, er.max_score, er.percentage, er.created_at,
                    e.title AS exam_title, e.code AS exam_code,
                    u.first_name, u.last_name
@@ -449,14 +514,14 @@ async def dashboard_submissions_for_day(
             JOIN exams e ON e.id = er.exam_id
             JOIN candidates c ON c.id = er.candidate_id
             JOIN users u ON u.id = c.user_id
-            WHERE e.tenant_id = :tenant_id
+            WHERE e.tenant_id = :tenant_id{exam_e_own}
               AND er.created_at >= :start_at
               AND er.created_at < :end_at
             ORDER BY er.created_at DESC
             LIMIT 200
             """
         ),
-        {"tenant_id": tenant_id, "start_at": start, "end_at": end},
+        params,
     )
     rows = [dict(r) for r in result.mappings().all()]
     return _map_submission_rows(rows)
@@ -560,3 +625,16 @@ async def restore_violation(
         raise HTTPException(status_code=404, detail="Violation not found")
     await db.commit()
     return {"restored": True}
+
+
+@router.get("/violations/{event_id}")
+async def violation_detail(
+    event_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Violation drill-down for dashboard integrity alerts (same tenant scope as dashboard)."""
+    data = await get_event_detail(db, event_id, str(current_user.tenant_id))
+    if data is None:
+        raise HTTPException(status_code=404, detail="Violation not found")
+    return data

@@ -15,6 +15,7 @@ import { formatExamTimeRange } from '@/lib/exam-dates';
 import { normalizeSecurityPolicy } from '@/lib/exam-security-policy';
 import { kycAllowsExam, kycExamBlockMessage } from '@/lib/kyc-exam';
 import { AlertTriangle, Clock, Shield, CheckCircle2, ArrowLeft, Calendar } from 'lucide-react';
+import { classTestSubjectLabel } from '@/lib/class-test-subject-label';
 
 type ExamInstructions = {
   title: string;
@@ -23,7 +24,12 @@ type ExamInstructions = {
   startTime: string;
   endTime: string;
   timezone?: string;
-  settings?: { durationMinutes: number; passingScore: number; negativeMarking: boolean };
+  settings?: {
+    durationMinutes: number; passingScore: number; negativeMarking: boolean;
+    combinedSubjects?: boolean; subjectId?: string;
+  };
+  sections?: { name?: string | null }[];
+  aiTestConfig?: { subjectId?: string | null } | null;
   securityPolicy?: { fullscreen?: boolean; fullscreenRequired?: boolean; blockCopyPaste?: boolean; proctoringEnabled?: boolean };
   registration: { sessions?: { status: string }[]; submittedAttemptCount?: number };
 };
@@ -92,7 +98,7 @@ export default function ExamInstructionsPage() {
 
       <main className="mx-auto max-w-3xl space-y-5 p-4 py-6 sm:space-y-6 sm:p-6 sm:py-10">
         <div className="space-y-2 text-center">
-          <Badge variant="secondary" className="mb-2">{exam.code}</Badge>
+          <Badge variant="secondary" className="mb-2">{classTestSubjectLabel(exam)}</Badge>
           <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{exam.title}</h1>
           <p className="text-muted-foreground">NCERT class test — read all instructions before you begin</p>
           <Badge variant={status.variant}>{status.label}</Badge>

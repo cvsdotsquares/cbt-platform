@@ -25,8 +25,14 @@ import { toast } from '@/hooks/use-toast';
 import { useDebounce } from '@/hooks/use-debounce';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import { ChevronDown, Search, Users, CheckCircle2, Clock, UserCheck, Pencil, Trash2, GraduationCap, Eye } from 'lucide-react';
+import {
+  ArrowUpDown, ChevronDown, Search, Users, CheckCircle2, Clock, UserCheck, Pencil, Trash2, GraduationCap, Eye, Mail,
+} from 'lucide-react';
 import { ReviewKycDialog, type KycReviewCandidate } from '@/components/admin/review-kyc-dialog';
+import {
+  ViewCandidateDetailsDialog,
+  type CandidateDetailsView,
+} from '@/components/admin/view-candidate-details-dialog';
 import { PaginationControls } from '@/components/layout/pagination';
 import { TableSkeleton } from '@/components/ui/skeleton';
 import {
@@ -34,19 +40,19 @@ import {
 } from '@/components/ui/dialog';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
-import {
-  UNASSIGNED_CLASS_HIGHLIGHT,
-  useNotificationStore,
-} from '@/stores/notification-store';
+import { useNotificationStore } from '@/stores/notification-store';
 
 type CandidateItem = {
   id: string;
   registrationNumber: string;
+  gender?: string | null;
+  guardianName?: string | null;
+  guardianPhone?: string | null;
   kycStatus: string;
   kycSubmittedAt?: string | null;
   createdAt: string;
   createdBy?: { id: string; name: string; email: string } | null;
-  user: { firstName: string; lastName: string; email: string; status: string };
+  user: { firstName: string; lastName: string; email: string; phone?: string | null; status: string };
   batchEnrollments?: {
     id: string;
     rollNumber?: string | null;
@@ -90,13 +96,31 @@ function classEnrollmentLabel(level: number, name?: string) {
   return `Class ${level}`;
 }
 
-type ClassTab = 'all' | 'unassigned' | string;
+type ClassTab = 'all' | string;
+type RosterView = 'students' | 'invites';
+type NameSort = 'roll' | 'name-asc' | 'name-desc';
 
 function rollRank(student: CandidateItem) {
   const raw = getEnrollment(student)?.rollNumber ?? '';
   const digits = String(raw).replace(/\D/g, '');
   const value = digits ? Number.parseInt(digits, 10) : Number.NaN;
   return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
+function sortStudentsByMode(
+  students: CandidateItem[],
+  nameSort: NameSort,
+  rollCompare: (a: CandidateItem, b: CandidateItem) => number,
+) {
+  if (nameSort === 'name-asc' || nameSort === 'name-desc') {
+    return [...students].sort((a, b) => {
+      const nameA = `${a.user.firstName} ${a.user.lastName}`.trim();
+      const nameB = `${b.user.firstName} ${b.user.lastName}`.trim();
+      const cmp = nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      return nameSort === 'name-asc' ? cmp : -cmp;
+    });
+  }
+  return [...students].sort(rollCompare);
 }
 
 function compareStudents(a: CandidateItem, b: CandidateItem) {
@@ -107,27 +131,15 @@ function compareStudents(a: CandidateItem, b: CandidateItem) {
   return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
 }
 
-function compareUnassignedStudents(a: CandidateItem, b: CandidateItem) {
-  const aSubmitted = a.kycStatus !== 'NOT_SUBMITTED';
-  const bSubmitted = b.kycStatus !== 'NOT_SUBMITTED';
-  if (aSubmitted !== bSubmitted) return aSubmitted ? -1 : 1;
-  const timeA = Date.parse(a.kycSubmittedAt || '') || 0;
-  const timeB = Date.parse(b.kycSubmittedAt || '') || 0;
-  if (timeA !== timeB) return timeB - timeA;
-  return compareStudents(a, b);
-}
-
 function groupStudentsByClass(
   students: CandidateItem[],
   sortedClasses: { id: string; level: number; name: string }[],
 ) {
   const byClassId = new Map<string, CandidateItem[]>();
-  const unassigned: CandidateItem[] = [];
 
   for (const c of students) {
     const enrollment = getEnrollment(c);
     if (!enrollment) {
-      unassigned.push(c);
       continue;
     }
     const list = byClassId.get(enrollment.classId) ?? [];
@@ -159,7 +171,7 @@ function groupStudentsByClass(
     })
     .sort((a, b) => a.classLevel - b.classLevel || a.className.localeCompare(b.className));
 
-  return { groups: [...groups, ...orphanGroups], unassigned };
+  return { groups: [...groups, ...orphanGroups] };
 }
 
 export default function CandidatesPage() {
@@ -177,10 +189,37 @@ export default function CandidatesPage() {
   const [batchFilter, setBatchFilter] = useState('');
   const [editCandidate, setEditCandidate] = useState<EditableCandidate | null>(null);
   const [batchCandidate, setBatchCandidate] = useState<BatchManageCandidate | null>(null);
-  const [collapsedClasses, setCollapsedClasses] = useState<Record<string, boolean>>({});
+  const [expandedClassSections, setExpandedClassSections] = useState<Record<string, boolean>>({});
+  const [rosterView, setRosterView] = useState<RosterView>('students');
+  const [nameSort, setNameSort] = useState<NameSort>('roll');
   const [removeTarget, setRemoveTarget] = useState<CandidateItem | null>(null);
   const [kycReviewCandidate, setKycReviewCandidate] = useState<KycReviewCandidate | null>(null);
+  const [viewCandidate, setViewCandidate] = useState<CandidateDetailsView | null>(null);
   const debouncedSearch = useDebounce(search);
+
+  function openStudentDetails(c: CandidateItem) {
+    const enrollment = getEnrollment(c);
+    setViewCandidate({
+      id: c.id,
+      registrationNumber: c.registrationNumber,
+      gender: c.gender,
+      guardianName: c.guardianName,
+      guardianPhone: c.guardianPhone,
+      kycStatus: c.kycStatus,
+      createdAt: c.createdAt,
+      createdBy: c.createdBy,
+      user: c.user,
+      enrollment: enrollment
+        ? {
+            className: enrollment.className,
+            classLevel: enrollment.classLevel,
+            batchName: enrollment.batchName,
+            academicYear: enrollment.academicYear,
+            rollNumber: enrollment.rollNumber,
+          }
+        : null,
+    });
+  }
 
   useEffect(() => {
     const q = searchParams.get('q');
@@ -210,10 +249,9 @@ export default function CandidatesPage() {
   }, [searchParams, accessToken]);
 
   const listFilters = useMemo(() => ({
-    academicClassId: classTab !== 'all' && classTab !== 'unassigned' ? classTab : undefined,
+    academicClassId: classTab !== 'all' ? classTab : undefined,
     batchId: batchFilter || undefined,
-    unassigned: (!teacherPortal && classTab === 'unassigned') || undefined,
-  }), [classTab, batchFilter, teacherPortal]);
+  }), [classTab, batchFilter]);
 
   const showGroupedByClass = classTab === 'all' && !batchFilter && !debouncedSearch;
 
@@ -254,7 +292,7 @@ export default function CandidatesPage() {
 
   const batchesForFilter = useMemo(() => {
     const list = batches ?? [];
-    const classId = classTab !== 'all' && classTab !== 'unassigned' ? classTab : '';
+    const classId = classTab !== 'all' ? classTab : '';
     if (!classId) return [...list].sort((a, b) => a.academicClass.level - b.academicClass.level || a.name.localeCompare(b.name));
     return list
       .filter((b) => b.academicClass.id === classId)
@@ -263,23 +301,32 @@ export default function CandidatesPage() {
 
   const items = (data?.items || []) as CandidateItem[];
 
-  const { groups: classGroups, unassigned: unassignedStudents } = useMemo(
+  const { groups: classGroups } = useMemo(
     () => groupStudentsByClass(items, sortedClasses),
     [items, sortedClasses],
   );
 
   const tabCounts = useMemo(() => {
     const byClass = new Map<string, number>();
-    let unassigned = 0;
     for (const c of items) {
       const enrollment = getEnrollment(c);
-      if (!enrollment) unassigned += 1;
-      else byClass.set(enrollment.classId, (byClass.get(enrollment.classId) ?? 0) + 1);
+      if (!enrollment) continue;
+      byClass.set(enrollment.classId, (byClass.get(enrollment.classId) ?? 0) + 1);
     }
-    return { byClass, unassigned, total: items.length };
+    return { byClass, total: items.length };
   }, [items]);
 
   const countsAreComplete = showGroupedByClass && (data?.total ?? 0) <= listLimit;
+
+  const canInviteStudent = synced && can(Permission.CANDIDATE_INVITE);
+
+  const { data: inviteData, isLoading: invitesLoading } = useQuery({
+    queryKey: ['registration-invites'],
+    queryFn: () => candidatesApi.listRegistrationInvites(accessToken!, 1, 50),
+    enabled: !!accessToken && canInviteStudent,
+    staleTime: 0,
+    refetchOnMount: 'always',
+  });
 
   const { data: kycStats } = useQuery({
     queryKey: ['candidates-stats'],
@@ -288,7 +335,6 @@ export default function CandidatesPage() {
       verified: number;
       pending: number;
       rejected?: number;
-      unassigned?: number;
       byClass?: { academicClassId: string; level: number; count: number }[];
     }>,
     enabled: !!accessToken,
@@ -306,9 +352,8 @@ export default function CandidatesPage() {
     }
     return {
       byClass,
-      unassigned: kycStats?.unassigned,
       total: kycStats?.total,
-      ready: kycStats?.byClass != null && kycStats.unassigned != null,
+      ready: kycStats?.byClass != null,
     };
   }, [kycStats]);
 
@@ -321,12 +366,6 @@ export default function CandidatesPage() {
   const resolveAllCount = (): number | null => {
     if (enrollmentCounts.ready && enrollmentCounts.total != null) return enrollmentCounts.total;
     if (countsAreComplete) return tabCounts.total;
-    return null;
-  };
-
-  const resolveUnassignedCount = (): number | null => {
-    if (enrollmentCounts.ready && enrollmentCounts.unassigned != null) return enrollmentCounts.unassigned;
-    if (countsAreComplete) return tabCounts.unassigned;
     return null;
   };
 
@@ -358,7 +397,7 @@ export default function CandidatesPage() {
 
   const totalPages = data?.totalPages ?? 1;
   const activeClassMeta =
-    classTab !== 'all' && classTab !== 'unassigned'
+    classTab !== 'all'
       ? sortedClasses.find((c) => c.id === classTab)
       : null;
 
@@ -370,10 +409,11 @@ export default function CandidatesPage() {
           <DataTableCell className="font-mono text-xs font-semibold text-primary">
             {c.registrationNumber}
           </DataTableCell>
-          <DataTableCell>
+          <DataTableCell className="min-w-[10rem] max-w-[14rem]">
             <div className="font-medium">{c.user.firstName} {c.user.lastName}</div>
-            <div className="text-xs text-muted-foreground">{c.user.email}</div>
+            <div className="text-xs text-muted-foreground break-all">{c.user.email}</div>
           </DataTableCell>
+          <DataTableCell className="text-sm whitespace-nowrap">{c.gender || '—'}</DataTableCell>
           {showClassColumn && (
             <DataTableCell>
               {enrollment ? (
@@ -431,17 +471,26 @@ export default function CandidatesPage() {
               {c.kycStatus.replace('_', ' ')}
             </Badge>
           </DataTableCell>
-          <DataTableCell>
-            <div>{c.createdBy?.name || 'Self-registered'}</div>
-            {c.createdBy?.email && (
-              <div className="text-xs text-muted-foreground">{c.createdBy.email}</div>
-            )}
+          <DataTableCell className="min-w-[6.5rem] max-w-[9rem] whitespace-normal text-sm">
+            <span className="line-clamp-2" title={c.createdBy?.name || 'Self-registered'}>
+              {c.createdBy?.name || 'Self-registered'}
+            </span>
           </DataTableCell>
-          <DataTableCell className="text-muted-foreground text-xs">
+          <DataTableCell className="whitespace-nowrap text-muted-foreground text-xs">
             {new Date(c.createdAt).toLocaleDateString()}
           </DataTableCell>
-          <DataTableCell>
+          <DataTableCell className="whitespace-nowrap">
             <div className="flex flex-wrap items-center gap-1">
+              {can(Permission.CANDIDATE_READ) && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title="View student details"
+                  onClick={() => openStudentDetails(c)}
+                >
+                  <Eye className="h-4 w-4" />
+                </Button>
+              )}
               {can(Permission.BATCH_MANAGE) && (
                 <Button
                   size="sm"
@@ -527,26 +576,49 @@ export default function CandidatesPage() {
       );
     });
 
-  function toggleClassSection(sectionId: string) {
-    setCollapsedClasses((current) => ({ ...current, [sectionId]: !current[sectionId] }));
+  function setClassSectionExpanded(sectionId: string, expanded: boolean) {
+    setExpandedClassSections((current) => ({ ...current, [sectionId]: expanded }));
+  }
+
+  function cycleNameSort() {
+    setNameSort((current) => (
+      current === 'roll' ? 'name-asc' : current === 'name-asc' ? 'name-desc' : 'roll'
+    ));
   }
 
   const renderStudentTable = (students: CandidateItem[], showClassColumn: boolean, compare = compareStudents) => {
-    const ordered = [...students].sort(compare);
+    const ordered = sortStudentsByMode(students, nameSort, compare);
     return (
     <ScrollableListPanel maxHeightClass="max-h-[min(480px,55vh)]" className="overflow-x-auto">
     <DataTable>
-      <table className="min-w-[880px] w-full">
+      <table className="w-full min-w-[920px] table-fixed">
         <DataTableHeader>
-          <DataTableHead>Reg. No</DataTableHead>
-          <DataTableHead>Name</DataTableHead>
-          {showClassColumn && <DataTableHead>Class</DataTableHead>}
-          <DataTableHead>Batch</DataTableHead>
-          <DataTableHead>Account</DataTableHead>
-          <DataTableHead>KYC</DataTableHead>
-          <DataTableHead>Registered by</DataTableHead>
-          <DataTableHead>Registered</DataTableHead>
-          <DataTableHead>Actions</DataTableHead>
+          <DataTableHead className="w-[7.5rem]">Reg. no</DataTableHead>
+          <DataTableHead className="w-[14rem]">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 font-semibold hover:text-primary"
+              onClick={cycleNameSort}
+              title={
+                nameSort === 'roll'
+                  ? 'Sort by name (A–Z)'
+                  : nameSort === 'name-asc'
+                    ? 'Sorted A–Z · click for Z–A'
+                    : 'Sorted Z–A · click for roll order'
+              }
+            >
+              Student
+              <ArrowUpDown className="h-3.5 w-3.5 opacity-70" />
+            </button>
+          </DataTableHead>
+          <DataTableHead className="w-[4.5rem]">Gender</DataTableHead>
+          {showClassColumn && <DataTableHead className="w-[5.5rem]">Class</DataTableHead>}
+          <DataTableHead className="w-[8rem]">Batch</DataTableHead>
+          <DataTableHead className="w-[5.5rem]">Account</DataTableHead>
+          <DataTableHead className="w-[5.5rem]">KYC</DataTableHead>
+          <DataTableHead className="w-[6.5rem] whitespace-normal leading-tight">Added by</DataTableHead>
+          <DataTableHead className="w-[5.5rem]">Joined</DataTableHead>
+          <DataTableHead className="w-[8.5rem]">Actions</DataTableHead>
         </DataTableHeader>
         <tbody>{renderStudentRows(ordered, showClassColumn)}</tbody>
       </table>
@@ -571,7 +643,8 @@ export default function CandidatesPage() {
   };
 
   const hasFilters = Boolean(debouncedSearch || batchFilter || classTab !== 'all');
-  const canInviteStudent = synced && can(Permission.CANDIDATE_INVITE);
+
+  const inviteItems = inviteData?.items ?? [];
 
   return (
     <div className="space-y-8">
@@ -609,6 +682,104 @@ export default function CandidatesPage() {
       </div>
       
       <div className="space-y-4">
+        {canInviteStudent && (
+          <HorizontalTabScroller>
+            <button
+              type="button"
+              onClick={() => setRosterView('students')}
+              className={cn(
+                'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                rosterView === 'students'
+                  ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                  : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+              )}
+            >
+              <Users className="h-4 w-4" />
+              Students
+            </button>
+            <button
+              type="button"
+              onClick={() => setRosterView('invites')}
+              className={cn(
+                'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                rosterView === 'invites'
+                  ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                  : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+              )}
+            >
+              <Mail className="h-4 w-4" />
+              Invites sent
+              {inviteData?.total != null && (
+                <span className={cn(
+                  'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                  rosterView === 'invites' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                )}>
+                  {inviteData.total}
+                </span>
+              )}
+            </button>
+          </HorizontalTabScroller>
+        )}
+
+        {rosterView === 'invites' ? (
+          <Card className="surface-card overflow-hidden">
+            <CardHeader className="border-b bg-muted/20 pb-4">
+              <CardTitle className="text-lg">Pending student invites</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Students who received a signup link but have not registered yet.
+              </p>
+            </CardHeader>
+            <CardContent className="p-0">
+              {invitesLoading ? (
+                <div className="p-6">
+                  <TableSkeleton rows={4} cols={4} />
+                </div>
+              ) : inviteItems.length ? (
+                <ScrollableListPanel maxHeightClass="max-h-[min(480px,55vh)]" className="overflow-x-auto">
+                  <DataTable>
+                    <table className="min-w-[640px] w-full">
+                      <DataTableHeader>
+                        <DataTableHead>Email</DataTableHead>
+                        <DataTableHead>Name</DataTableHead>
+                        <DataTableHead>Batch</DataTableHead>
+                        <DataTableHead>Sent</DataTableHead>
+                        <DataTableHead>Expires</DataTableHead>
+                      </DataTableHeader>
+                      <tbody>
+                        {inviteItems.map((inv) => (
+                          <DataTableRow key={inv.id}>
+                            <DataTableCell className="font-medium">{inv.email}</DataTableCell>
+                            <DataTableCell>
+                              {[inv.firstName, inv.lastName].filter(Boolean).join(' ') || '—'}
+                            </DataTableCell>
+                            <DataTableCell className="text-sm text-muted-foreground">
+                              {inv.batch
+                                ? `${inv.batch.name} (${inv.batch.academicYear})`
+                                : '—'}
+                            </DataTableCell>
+                            <DataTableCell className="text-xs text-muted-foreground">
+                              {inv.createdAt ? new Date(inv.createdAt).toLocaleString() : '—'}
+                            </DataTableCell>
+                            <DataTableCell className="text-xs text-muted-foreground">
+                              {inv.expiresAt ? new Date(inv.expiresAt).toLocaleDateString() : '—'}
+                            </DataTableCell>
+                          </DataTableRow>
+                        ))}
+                      </tbody>
+                    </table>
+                  </DataTable>
+                </ScrollableListPanel>
+              ) : (
+                <EmptyState
+                  icon={Mail}
+                  title="No pending invites"
+                  description="Create an invite to see students waiting to sign up here."
+                />
+              )}
+            </CardContent>
+          </Card>
+        ) : (
+        <>
         <HorizontalTabScroller>
           <button
             type="button"
@@ -669,35 +840,6 @@ export default function CandidatesPage() {
               </button>
             );
           })}
-          {!teacherPortal && (
-            <button
-              type="button"
-              onClick={() => {
-                setClassTab('unassigned');
-                setBatchFilter('');
-                setPage(1);
-                clearClassRegistrationHighlight(UNASSIGNED_CLASS_HIGHLIGHT);
-              }}
-              className={cn(
-                'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
-                classTab === 'unassigned'
-                  ? 'border-amber-500 bg-amber-500 text-white shadow-sm'
-                  : classRegistrationHighlights[UNASSIGNED_CLASS_HIGHLIGHT]
-                    ? 'border-amber-400 bg-amber-100 text-amber-950 shadow-sm ring-1 ring-amber-300/80 dark:border-amber-500/60 dark:bg-amber-500/20 dark:text-amber-50'
-                    : 'border-border/60 bg-card text-muted-foreground hover:border-amber-500/40 hover:text-foreground',
-              )}
-            >
-              Unassigned
-              {resolveUnassignedCount() != null && (
-                <span className={cn(
-                  'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
-                  classTab === 'unassigned' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
-                )}>
-                  {resolveUnassignedCount()}
-                </span>
-              )}
-            </button>
-          )}
         </HorizontalTabScroller>
 
         <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
@@ -716,7 +858,6 @@ export default function CandidatesPage() {
           <select
             className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm sm:w-auto sm:min-w-[12rem] sm:max-w-xs sm:flex-1"
             value={batchFilter}
-            disabled={classTab === 'unassigned'}
             onChange={(e) => { setBatchFilter(e.target.value); setPage(1); }}
           >
             <option value="">All batches</option>
@@ -727,37 +868,49 @@ export default function CandidatesPage() {
             ))}
           </select>
         </div>
-      </div>
 
       {showGroupedByClass ? (
         <ScrollableListPanel maxHeightClass="max-h-[min(75vh,800px)]" className="space-y-6">
           {classGroups.map((group) => {
-            const collapsed = Boolean(collapsedClasses[group.classId]);
+            const expanded = expandedClassSections[group.classId] === true;
             return (
             <Card key={group.classId} className="surface-card overflow-hidden">
-              <CardHeader className={cn('bg-muted/20 pb-4', !collapsed && 'border-b')}>
-                <button
-                  type="button"
-                  aria-expanded={!collapsed}
-                  onClick={() => toggleClassSection(group.classId)}
-                  className="flex w-full flex-wrap items-center gap-3 text-left"
-                >
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-sm font-bold text-primary">
-                    {group.classLevel}
-                  </span>
+              <CardHeader
+                role="button"
+                tabIndex={0}
+                aria-expanded={expanded}
+                aria-label={`${group.className}, ${group.students.length} students. ${expanded ? 'Collapse' : 'Expand'} list`}
+                className={cn(
+                  'cursor-pointer bg-muted/20 pb-4 transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                  expanded && 'border-b',
+                )}
+                onClick={() => setClassSectionExpanded(group.classId, !expanded)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setClassSectionExpanded(group.classId, !expanded);
+                  }
+                }}
+              >
+                <div className="flex w-full items-center gap-3">
                   <div className="min-w-0 flex-1">
                     <CardTitle className="text-lg">{group.className}</CardTitle>
                     <p className="text-sm text-muted-foreground">
                       {group.students.length} student{group.students.length === 1 ? '' : 's'}
+                      {' · '}
+                      Class {group.classLevel}
                     </p>
                   </div>
-                  <Badge variant="secondary" className="normal-case tracking-normal">
-                    Class {group.classLevel}
-                  </Badge>
-                  <ChevronDown className={cn('h-5 w-5 shrink-0 text-muted-foreground transition-transform', collapsed && '-rotate-90')} />
-                </button>
+                  <ChevronDown
+                    className={cn(
+                      'h-5 w-5 shrink-0 text-muted-foreground transition-transform',
+                      !expanded && '-rotate-90',
+                    )}
+                    aria-hidden
+                  />
+                </div>
               </CardHeader>
-              {!collapsed && (
+              {expanded && (
               <CardContent className="p-0">
                 {renderStudentTable(group.students, false)}
               </CardContent>
@@ -765,38 +918,7 @@ export default function CandidatesPage() {
             </Card>
             );
           })}
-          {unassignedStudents.length > 0 && (
-            <Card className="surface-card overflow-hidden border-amber-500/30">
-              <CardHeader className={cn('bg-amber-500/5 pb-4', !collapsedClasses.unassigned && 'border-b border-amber-500/20')}>
-                <button
-                  type="button"
-                  aria-expanded={!collapsedClasses.unassigned}
-                  onClick={() => toggleClassSection('unassigned')}
-                  className="flex w-full flex-wrap items-center gap-3 text-left"
-                >
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-sm font-bold text-amber-700">
-                    ?
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <CardTitle className="text-lg">Unassigned</CardTitle>
-                    <p className="text-sm text-muted-foreground">
-                      Not linked to a class batch yet — assign a batch to include them in exams.
-                    </p>
-                  </div>
-                  <Badge variant="outline" className="border-amber-500/40 text-amber-800">
-                    {unassignedStudents.length} student{unassignedStudents.length === 1 ? '' : 's'}
-                  </Badge>
-                  <ChevronDown className={cn('h-5 w-5 shrink-0 text-muted-foreground transition-transform', collapsedClasses.unassigned && '-rotate-90')} />
-                </button>
-              </CardHeader>
-              {!collapsedClasses.unassigned && (
-              <CardContent className="p-0">
-                {renderStudentTable(unassignedStudents, false, compareUnassignedStudents)}
-              </CardContent>
-              )}
-            </Card>
-          )}
-          {!classGroups.length && !unassignedStudents.length && (
+          {!classGroups.length && (
             <Card className="surface-card">
               {renderStudentTable([], false)}
             </Card>
@@ -804,7 +926,7 @@ export default function CandidatesPage() {
         </ScrollableListPanel>
       ) : (
         <>
-          {activeClassMeta && classTab !== 'unassigned' && (
+          {activeClassMeta && (
             <Card className="surface-card overflow-hidden">
               <CardHeader className="border-b bg-muted/20 pb-4">
                 <div className="flex flex-wrap items-center gap-3">
@@ -822,19 +944,6 @@ export default function CandidatesPage() {
               </CardHeader>
               <CardContent className="p-0">
                 {renderStudentTable(items, false)}
-              </CardContent>
-            </Card>
-          )}
-          {classTab === 'unassigned' && (
-            <Card className="surface-card overflow-hidden border-amber-500/30">
-              <CardHeader className="border-b border-amber-500/20 bg-amber-500/5 pb-4">
-                <CardTitle className="text-lg">Unassigned students</CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Students without a class batch assignment.
-                </p>
-              </CardHeader>
-              <CardContent className="p-0">
-                {renderStudentTable(items, false, compareUnassignedStudents)}
               </CardContent>
             </Card>
           )}
@@ -863,12 +972,21 @@ export default function CandidatesPage() {
       {isFetching && !isLoading && (
         <p className="text-center text-xs text-muted-foreground">Updating...</p>
       )}
+        </>
+        )}
+      </div>
 
       <EditCandidateDialog
         accessToken={accessToken!}
         candidate={editCandidate}
         open={!!editCandidate}
         onOpenChange={(open) => { if (!open) setEditCandidate(null); }}
+      />
+
+      <ViewCandidateDetailsDialog
+        candidate={viewCandidate}
+        open={!!viewCandidate}
+        onOpenChange={(open) => { if (!open) setViewCandidate(null); }}
       />
 
       <ReviewKycDialog

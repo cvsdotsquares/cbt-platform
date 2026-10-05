@@ -1,14 +1,17 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuthStore } from '@/stores/auth-store';
 import { useRouter, usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { LogOut, Bell, Menu, GraduationCap } from 'lucide-react';
+import { LogOut, Bell, Menu, GraduationCap, Trash2 } from 'lucide-react';
 import { authApi, isAdmin } from '@/lib/api';
 import { normalizeRoles } from '@/lib/roles';
 import { useLiveNotifications } from '@/hooks/use-live-notifications';
 import { useNotificationStore } from '@/stores/notification-store';
+import { usePermissions } from '@/hooks/use-permissions';
+import { getStaffProfileLabel } from '@/lib/staff-profile-label';
 import { MobileNav } from './mobile-nav';
 import { ThemeToggle } from './theme-toggle';
 import { cn } from '@/lib/utils';
@@ -24,7 +27,7 @@ const pageTitles: Record<string, string> = {
   '/dashboard/results': 'Results',
   '/dashboard/teacher': 'Home',
   '/dashboard/questions': 'Question Bank',
-  '/dashboard/users': 'Staff & Teachers',
+  '/dashboard/users': 'Teachers',
   '/dashboard/permissions': 'Role Permissions',
   '/dashboard/analytics': 'Analytics',
   '/dashboard/monitoring': 'Live Monitoring',
@@ -39,31 +42,48 @@ export function Header() {
   const { user, logout, accessToken } = useAuthStore();
   const router = useRouter();
   const pathname = usePathname();
+  const { can } = usePermissions();
   const [showNotifications, setShowNotifications] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const bellRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const [panelPos, setPanelPos] = useState<{ top: number; right: number } | null>(null);
 
   const notifications = useNotificationStore((s) => s.items);
   const markRead = useNotificationStore((s) => s.markRead);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
-  const panelOpenSignal = useNotificationStore((s) => s.panelOpenSignal);
+  const removeNotification = useNotificationStore((s) => s.remove);
   const unreadCount = notifications.filter((n) => !n.read).length;
-  const lastPanelSignal = useRef(panelOpenSignal);
 
   useLiveNotifications();
 
-  useEffect(() => {
-    if (panelOpenSignal > lastPanelSignal.current) {
-      setShowNotifications(true);
+  useLayoutEffect(() => {
+    if (!showNotifications || !bellRef.current) {
+      setPanelPos(null);
+      return;
     }
-    lastPanelSignal.current = panelOpenSignal;
-  }, [panelOpenSignal]);
+    function updatePosition() {
+      const rect = bellRef.current!.getBoundingClientRect();
+      setPanelPos({
+        top: rect.bottom + 8,
+        right: Math.max(8, window.innerWidth - rect.right),
+      });
+    }
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [showNotifications]);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        setShowNotifications(false);
-      }
+      const target = e.target as Node;
+      if (bellRef.current?.contains(target)) return;
+      if (panelRef.current?.contains(target)) return;
+      setShowNotifications(false);
     }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -74,6 +94,7 @@ export function Header() {
   }, [pathname]);
 
   const initials = `${user?.firstName?.[0] || ''}${user?.lastName?.[0] || ''}`.toUpperCase();
+  const profileLabel = getStaffProfileLabel(user?.roles, can);
 
   async function handleLogout() {
     if (accessToken) {
@@ -82,6 +103,85 @@ export function Header() {
     await logout();
     window.location.href = '/login';
   }
+
+  const notificationPanel = showNotifications && panelPos && typeof document !== 'undefined'
+    ? createPortal(
+        <div
+          ref={panelRef}
+          className="fixed z-[200] w-[min(22rem,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border border-border/60 bg-card shadow-xl backdrop-blur-xl animate-fade-in-up"
+          style={{ top: panelPos.top, right: panelPos.right }}
+        >
+          <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
+            <p className="text-sm font-semibold">Notifications</p>
+            {unreadCount > 0 && (
+              <button type="button" className="text-xs text-primary hover:underline" onClick={markAllRead}>
+                Mark all read
+              </button>
+            )}
+          </div>
+          <div className="max-h-80 overflow-y-auto">
+            {notifications.length === 0 ? (
+              <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
+                <Bell className="h-8 w-8 text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground">No notifications yet</p>
+              </div>
+            ) : (
+              notifications.map((n) => (
+                <div
+                  key={n.id}
+                  className={cn(
+                    'flex items-stretch gap-2 border-b border-border/40 transition-all duration-150',
+                    !n.read && 'bg-primary/5 border-l-2 border-l-primary',
+                  )}
+                >
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 flex-col gap-0.5 px-4 py-3 text-left hover:bg-muted/30"
+                    onClick={() => markRead(n.id)}
+                  >
+                    <span className="text-sm font-medium">{n.title}</span>
+                    <span className="text-xs text-muted-foreground">{n.message}</span>
+                    <span className="text-[10px] text-muted-foreground/70">
+                      {new Date(n.timestamp).toLocaleString()}
+                    </span>
+                  </button>
+                  <div className="flex shrink-0 flex-col items-center justify-center gap-1 pr-2 sm:flex-row sm:pr-3">
+                    {n.href && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs"
+                        onClick={() => {
+                          markRead(n.id);
+                          setShowNotifications(false);
+                          router.push(n.href!);
+                        }}
+                      >
+                        View
+                      </Button>
+                    )}
+                    <button
+                      type="button"
+                      className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      title="Delete notification"
+                      aria-label="Delete notification"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeNotification(n.id);
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>,
+        document.body,
+      )
+    : null;
 
   return (
     <>
@@ -114,8 +214,9 @@ export function Header() {
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-          <div className="relative" ref={panelRef}>
+          <div className="relative">
             <button
+              ref={bellRef}
               type="button"
               className={cn(
                 'relative flex h-10 w-10 items-center justify-center rounded-full',
@@ -126,6 +227,7 @@ export function Header() {
               )}
               onClick={() => setShowNotifications((v) => !v)}
               title="Notifications"
+              aria-expanded={showNotifications}
             >
               <Bell className={cn('h-[17px] w-[17px] transition-transform', showNotifications && 'rotate-12')} />
               {unreadCount > 0 && (
@@ -134,66 +236,7 @@ export function Header() {
                 </span>
               )}
             </button>
-
-            {showNotifications && (
-              <div className="absolute right-0 top-full z-50 mt-2 w-[min(22rem,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border border-border/60 bg-card shadow-xl backdrop-blur-xl animate-fade-in-up">
-                <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-                  <p className="text-sm font-semibold">Notifications</p>
-                  {unreadCount > 0 && (
-                    <button type="button" className="text-xs text-primary hover:underline" onClick={markAllRead}>
-                      Mark all read
-                    </button>
-                  )}
-                </div>
-                <div className="max-h-80 overflow-y-auto">
-                  {notifications.length === 0 ? (
-                    <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-                      <Bell className="h-8 w-8 text-muted-foreground/30" />
-                      <p className="text-sm text-muted-foreground">No notifications yet</p>
-                    </div>
-                  ) : (
-                    notifications.map((n) => (
-                      <div
-                        key={n.id}
-                        className={cn(
-                          'flex items-stretch gap-2 border-b border-border/40 transition-all duration-150',
-                          !n.read && 'bg-primary/5 border-l-2 border-l-primary',
-                        )}
-                      >
-                        <button
-                          type="button"
-                          className="flex min-w-0 flex-1 flex-col gap-0.5 px-4 py-3 text-left hover:bg-muted/30"
-                          onClick={() => markRead(n.id)}
-                        >
-                          <span className="text-sm font-medium">{n.title}</span>
-                          <span className="text-xs text-muted-foreground">{n.message}</span>
-                          <span className="text-[10px] text-muted-foreground/70">
-                            {new Date(n.timestamp).toLocaleString()}
-                          </span>
-                        </button>
-                        {n.type === 'kyc' && n.href && (
-                          <div className="flex shrink-0 items-center pr-3">
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className="h-8 text-xs"
-                              onClick={() => {
-                                markRead(n.id);
-                                setShowNotifications(false);
-                                router.push(n.href!);
-                              }}
-                            >
-                              View
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            )}
+            {notificationPanel}
           </div>
 
           <ThemeToggle />
@@ -206,8 +249,8 @@ export function Header() {
               <p className="text-[12px] font-semibold leading-none">
                 {user?.firstName} {user?.lastName}
               </p>
-              <p className="mt-0.5 text-[10px] capitalize text-muted-foreground">
-                {user?.roles?.[0]?.replace(/_/g, ' ').toLowerCase()}
+              <p className="mt-0.5 max-w-[11rem] truncate text-[10px] capitalize text-muted-foreground" title={profileLabel}>
+                {profileLabel}
               </p>
             </div>
           </div>

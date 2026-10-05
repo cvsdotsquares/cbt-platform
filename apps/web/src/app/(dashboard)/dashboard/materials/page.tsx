@@ -1,6 +1,9 @@
 'use client';
 
-import { useRef, useState, useMemo, useEffect, type ComponentProps } from 'react';
+import {
+  useRef, useState, useMemo, useEffect, type ComponentProps, type InputHTMLAttributes,
+} from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -8,20 +11,37 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PageHeader } from '@/components/layout/page-header';
-import { materialsApi, curriculumApi } from '@/lib/api';
+import { materialsApi, curriculumApi, batchesApi } from '@/lib/api';
+import { sessionsMatch } from '@/lib/academic-session';
+import { displayChapterTitle } from '@/lib/chapter-title';
+import { invalidateStudentSyllabusLive } from '@/lib/student-syllabus-poll';
 import { useRequireAuth } from '@/hooks/use-auth';
+import { useMaterialIndexingSync } from '@/hooks/use-material-indexing-sync';
+import { materialsNeedLivePoll } from '@/lib/materials-indexing-poll';
 import { usePermissions } from '@/hooks/use-permissions';
 import { Permission, guessSubjectId } from '@cbt/shared';
 import { toast } from '@/hooks/use-toast';
 import {
-  Upload, FileText, RefreshCw, Trash2, Loader2, Eye, Download, BookOpen, Shield, X,
+  Upload, FileText, RefreshCw, Trash2, Loader2, Eye, Download, BookOpen, Shield, X, Plus,
+  FolderOpen, Pencil,
 } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth-store';
 import {
   readMaterialsUploadSession,
   writeMaterialsUploadSession,
 } from '@/lib/materials-upload-session';
+import { AcademicSessionField } from '@/components/forms/academic-session-field';
+import { defaultAcademicSession } from '@/lib/academic-session';
+import { batchMatchesSelectedClass, formatAcademicClassLabel } from '@/lib/academic-class';
 
 type Material = {
   id: string;
@@ -35,10 +55,13 @@ type Material = {
   academicSession: string;
   errorMessage?: string | null;
   createdAt: string;
+  academicClassId?: string | null;
+  subjectId?: string | null;
   academicClass?: { level: number; name: string } | null;
   subject?: { name: string; code: string } | null;
   chapter?: { title: string; number: number } | null;
   topic?: { title: string } | null;
+  isFullBook?: boolean;
 };
 
 type AcademicClass = {
@@ -77,26 +100,29 @@ function materialStatusBadgeVariant(status: string): ComponentProps<typeof Badge
   return 'outline';
 }
 
-const DOC_TYPES = [
-  { value: 'NCERT', label: 'NCERT PDF' },
-  { value: 'INSTITUTE_NOTES', label: 'Institute Notes' },
-  { value: 'WORKSHEET', label: 'Worksheet' },
-  { value: 'TEACHER_NOTES', label: 'Teacher Notes' },
-  { value: 'QUESTION_BANK', label: 'Question Bank' },
-];
-
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const UPLOAD_PARALLEL_BATCHES = 4;
 const FILES_PER_BATCH = 6;
 
+function freshUploadMeta() {
+  return {
+    academicClassId: '',
+    subjectId: '',
+    chapterId: '',
+    batchId: '',
+    academicSession: defaultAcademicSession(),
+  };
+}
+
+type PendingUpload = { file: File; title: string };
+
 type UploadJobPayload = {
-  files: File[];
+  pending: PendingUpload[];
   meta: {
-    title: string;
-    type: string;
     academicClassId: string;
     subjectId: string;
     chapterId: string;
+    batchId: string;
     academicSession: string;
   };
   uploadScope: 'FULL_BOOK' | 'CHAPTER';
@@ -113,12 +139,27 @@ type UploadMutateContext = {
   placeholders: Material[];
 };
 
+function queueItemMetaLine(m: Material): string {
+  const parts: string[] = [];
+  if (m.subject) parts.push(m.subject.name);
+  if (m.chapter) {
+    parts.push(`Ch.${m.chapter.number} ${displayChapterTitle(m.chapter.title)}`);
+  } else if (m.subject) {
+    parts.push(m.isFullBook === false ? 'Chapter document' : 'Complete book');
+  }
+  parts.push(formatFileSize(m.fileSize));
+  if (m.status === 'READY' && m.chunkCount > 0) parts.push(`${m.chunkCount} chunks`);
+  return parts.join(' · ');
+}
+
 function enrichUploadedMaterial(api: Material, placeholder?: Material): Material {
   if (!placeholder) return api;
   return {
     ...api,
     academicClass: api.academicClass ?? placeholder.academicClass,
     subject: api.subject ?? placeholder.subject,
+    isFullBook: api.isFullBook ?? placeholder.isFullBook,
+    chapter: api.chapter ?? placeholder.chapter,
   };
 }
 
@@ -156,9 +197,18 @@ function buildSessionQueueFromIds(ids: string[], ...sources: Material[][]): Mate
   return ids.map((id) => byId.get(id)).filter((m): m is Material => !!m);
 }
 
-function chunkFiles(files: File[], size: number): File[][] {
-  const batches: File[][] = [];
-  for (let i = 0; i < files.length; i += size) batches.push(files.slice(i, i + size));
+function defaultTitleFromFileName(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, '');
+}
+
+function pendingUploadKey(entry: PendingUpload): string {
+  const { file } = entry;
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function chunkPendingUploads(items: PendingUpload[], size: number): PendingUpload[][] {
+  const batches: PendingUpload[][] = [];
+  for (let i = 0; i < items.length; i += size) batches.push(items.slice(i, i + size));
   return batches;
 }
 
@@ -179,35 +229,135 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function uploadBlockingReason(
+  pending: PendingUpload[],
+  meta: { academicClassId: string; subjectId: string },
+): string | null {
+  if (!pending.length) return null;
+  if (!meta.academicClassId) return 'Select a class before uploading.';
+  if (!meta.subjectId) return 'Select a subject for this class.';
+  const missingTitle = pending.find((row) => !row.title.trim());
+  if (missingTitle) {
+    return `Add a title for “${missingTitle.file.name}” (or restore the suggested name).`;
+  }
+  return null;
+}
+
+function resolvePendingTitle(row: PendingUpload): string {
+  const trimmed = row.title.trim();
+  if (!trimmed) {
+    throw new Error(`Add a title for “${row.file.name}”.`);
+  }
+  return trimmed;
+}
+
 export default function MaterialsPage() {
+  const searchParams = useSearchParams();
   const { accessToken } = useRequireAuth(true);
   const { can } = usePermissions();
   const { user } = useAuthStore();
   const canUpload = can(Permission.MATERIAL_UPLOAD);
   const canDelete = can(Permission.MATERIAL_DELETE);
+  const canManageCurriculum = can(Permission.CURRICULUM_MANAGE);
   const queryClient = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
   /** Match queue rows to server materials only after upload HTTP completes (by id, not filename). */
   const sessionMaterialIdsRef = useRef<string[]>([]);
   const uploadSessionHydratedRef = useRef(false);
+  /** Material ids awaiting READY/FAILED after re-index or post-upload indexing. */
+  const pendingReindexRef = useRef<Map<string, { title: string }>>(new Map());
+  const [reindexWatchIds, setReindexWatchIds] = useState<string[]>([]);
+
+  const beginReindexWatch = (material: Pick<Material, 'id' | 'title'>) => {
+    pendingReindexRef.current.set(material.id, { title: material.title });
+    setReindexWatchIds((ids) => (ids.includes(material.id) ? ids : [...ids, material.id]));
+  };
+
+  const endReindexWatch = (materialId: string) => {
+    pendingReindexRef.current.delete(materialId);
+    setReindexWatchIds((ids) => ids.filter((id) => id !== materialId));
+  };
+
+  const patchMaterialOnClient = (materialId: string, incoming: Partial<Material>) => {
+    queryClient.setQueryData<Material[]>(['materials'], (old) =>
+      (old ?? []).map((row) =>
+        row.id === materialId
+          ? pickFresherMaterial(row, { ...row, ...incoming } as Material)
+          : row,
+      ),
+    );
+    setSessionQueue((prev) =>
+      prev.map((row) =>
+        row.id === materialId
+          ? pickFresherMaterial(row, { ...row, ...incoming } as Material)
+          : row,
+      ),
+    );
+  };
 
   const syncUploadSessionStorage = (queue: Material[], ids: string[]) => {
     if (!user?.id) return;
     writeMaterialsUploadSession(user.id, ids, queue);
   };
   const [openingId, setOpeningId] = useState<string | null>(null);
-  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
-  /** Only documents from the current upload batch — not full server history. */
+  /** Documents uploaded in this browser session — not full server history. */
   const [sessionQueue, setSessionQueue] = useState<Material[]>([]);
-  const [uploadScope, setUploadScope] = useState<'FULL_BOOK' | 'CHAPTER'>('FULL_BOOK');
-  const [meta, setMeta] = useState({
-    title: '',
-    type: 'NCERT',
-    academicClassId: '',
-    subjectId: '',
-    chapterId: '',
-    academicSession: '2025-26',
+  const [meta, setMeta] = useState(freshUploadMeta);
+  const [addSubjectOpen, setAddSubjectOpen] = useState(false);
+  const [newSubjectName, setNewSubjectName] = useState('');
+  const [newSubjectCode, setNewSubjectCode] = useState('');
+
+  const createSubjectMutation = useMutation({
+    mutationFn: async () => {
+      if (!meta.academicClassId) throw new Error('Select a class first');
+      const name = newSubjectName.trim();
+      if (!name) throw new Error('Subject name is required');
+      const code = newSubjectCode.trim();
+      const academicClassId = meta.academicClassId;
+      const created = (await curriculumApi.createSubject(accessToken!, {
+        academicClassId,
+        name,
+        ...(code ? { code } : {}),
+      })) as {
+        id: string;
+        name: string;
+        code: string;
+        books?: AcademicClass['subjects'][number]['books'];
+      };
+      return { ...created, academicClassId };
+    },
+    onSuccess: (subject) => {
+      queryClient.setQueryData<AcademicClass[]>(['curriculum-classes'], (old) => {
+        const list = old ?? [];
+        return list.map((cls) => {
+          if (cls.id !== subject.academicClassId) return cls;
+          if (cls.subjects.some((s) => s.id === subject.id)) return cls;
+          const books = subject.books ?? [];
+          return {
+            ...cls,
+            subjects: [...cls.subjects, { id: subject.id, name: subject.name, code: subject.code, books }],
+          };
+        });
+      });
+      void queryClient.invalidateQueries({ queryKey: ['curriculum-classes'] });
+      void queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+      void queryClient.invalidateQueries({ queryKey: ['curriculum-all-classes'] });
+      setMeta((m) => ({ ...m, subjectId: subject.id, chapterId: '' }));
+      setAddSubjectOpen(false);
+      setNewSubjectName('');
+      setNewSubjectCode('');
+      toast({
+        title: 'Subject added',
+        description: `${subject.name} (${subject.code}) is ready for book uploads.`,
+        variant: 'success',
+      });
+    },
+    onError: (e: Error) => {
+      toast({ title: 'Could not add subject', description: e.message, variant: 'destructive' });
+    },
   });
 
   useEffect(() => {
@@ -239,15 +389,35 @@ export default function MaterialsPage() {
     };
   }, [accessToken, canUpload, queryClient]);
 
+  const sessionNeedsPoll = sessionQueue.some(
+    (m) =>
+      isUploadPlaceholder(m)
+      || m.status === 'PENDING'
+      || m.status === 'INDEXING',
+  );
+  const reindexNeedsPoll = reindexWatchIds.length > 0;
+
   const { data: materials } = useQuery({
     queryKey: ['materials'],
     queryFn: () => materialsApi.list(accessToken!) as Promise<Material[]>,
-    enabled: !!accessToken && sessionQueue.length > 0,
+    enabled:
+      !!accessToken
+      && (
+        sessionNeedsPoll
+        || reindexNeedsPoll
+        || sessionQueue.length > 0
+        || materialsNeedLivePoll(queryClient.getQueryData<Material[]>(['materials']))
+      ),
     staleTime: 0,
-    refetchInterval: sessionQueue.some((m) => m.status === 'PENDING' || m.status === 'INDEXING')
-      ? 3000
-      : false,
+    refetchInterval: (query) => {
+      const server = query.state.data as Material[] | undefined;
+      return sessionNeedsPoll || reindexNeedsPoll || materialsNeedLivePoll(server)
+        ? 3000
+        : false;
+    },
   });
+
+  useMaterialIndexingSync(queryClient, materials);
 
   const { data: classes } = useQuery({
     queryKey: ['curriculum-classes'],
@@ -255,20 +425,54 @@ export default function MaterialsPage() {
     enabled: !!accessToken,
   });
 
-  const { data: extractedSyllabus } = useQuery({
-    queryKey: ['curriculum-from-uploads'],
-    queryFn: () => curriculumApi.getClasses(accessToken!, { uploadedOnly: true }) as Promise<AcademicClass[]>,
-    enabled: !!accessToken && !!meta.academicClassId,
+  const { data: instituteBatches } = useQuery({
+    queryKey: ['batches'],
+    queryFn: () => batchesApi.list(accessToken!) as Promise<{
+      id: string;
+      name: string;
+      academicYear: string;
+      academicClass: { id: string; level: number; name: string };
+    }[]>,
+    enabled: !!accessToken && canUpload,
   });
 
+  const uploadClassLevel = (classes ?? []).find((c) => c.id === meta.academicClassId)?.level;
+
+  const sessionExtraOptions = useMemo(
+    () => [...new Set((instituteBatches ?? []).map((b) => b.academicYear).filter(Boolean))],
+    [instituteBatches],
+  );
+
+  const sectionsForUpload = useMemo(() => {
+    if (!meta.academicClassId) return [];
+    return (instituteBatches ?? []).filter(
+      (b) =>
+        batchMatchesSelectedClass(b, meta.academicClassId, uploadClassLevel)
+        && sessionsMatch(b.academicYear, meta.academicSession),
+    );
+  }, [instituteBatches, meta.academicClassId, meta.academicSession, uploadClassLevel]);
+
+  useEffect(() => {
+    if (!meta.batchId) return;
+    if (!sectionsForUpload.some((b) => b.id === meta.batchId)) {
+      setMeta((m) => ({ ...m, batchId: '' }));
+    }
+  }, [meta.batchId, sectionsForUpload]);
+
+  useEffect(() => {
+    const classId = searchParams.get('class') ?? searchParams.get('classId');
+    const batchId = searchParams.get('batch') ?? searchParams.get('batchId');
+    const session = searchParams.get('session');
+    if (!classId && !batchId && !session) return;
+    setMeta((m) => ({
+      ...m,
+      ...(classId ? { academicClassId: classId } : {}),
+      ...(batchId ? { batchId } : {}),
+      ...(session ? { academicSession: session } : {}),
+    }));
+  }, [searchParams]);
+
   const selectedClass = (classes ?? []).find((c) => c.id === meta.academicClassId);
-  const selectedSubject = selectedClass?.subjects.find((s) => s.id === meta.subjectId);
-  const extractedChapters = useMemo(() => {
-    const extractedClass = (extractedSyllabus ?? []).find((c) => c.id === meta.academicClassId);
-    const extractedSubject = extractedClass?.subjects.find((s) => s.id === meta.subjectId);
-    return extractedSubject?.books.flatMap((b) => b.chapters) ?? [];
-  }, [extractedSyllabus, meta.academicClassId, meta.subjectId]);
-  const chapters = extractedChapters;
 
   const addPendingFiles = (incoming: FileList | File[]) => {
     const next = Array.from(incoming);
@@ -276,41 +480,41 @@ export default function MaterialsPage() {
     const tooLarge = next.filter((f) => f.size > MAX_UPLOAD_BYTES);
     if (tooLarge.length) {
       toast({
-        title: 'File too large',
+        title: 'File too large.',
         description: `${tooLarge.map((f) => f.name).join(', ')} exceeds the 100 MB limit.`,
         variant: 'destructive',
       });
     }
     const accepted = next.filter((f) => f.size <= MAX_UPLOAD_BYTES);
     if (!accepted.length) return;
-    setPendingFiles((prev) => {
-      const seen = new Set(prev.map((f) => `${f.name}:${f.size}:${f.lastModified}`));
+    setPendingUploads((prev) => {
+      const seen = new Set(prev.map(pendingUploadKey));
       const merged = [...prev];
       for (const file of accepted) {
-        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        const entry: PendingUpload = {
+          file,
+          title: defaultTitleFromFileName(file.name),
+        };
+        const key = pendingUploadKey(entry);
         if (!seen.has(key)) {
           seen.add(key);
-          merged.push(file);
+          merged.push(entry);
         }
       }
       return merged;
     });
-    if (accepted.length === 1) {
-      setMeta((m) => ({ ...m, title: accepted[0].name.replace(/\.[^.]+$/, '') }));
-    }
+  };
+
+  const updatePendingTitle = (index: number, title: string) => {
+    setPendingUploads((prev) =>
+      prev.map((row, i) => (i === index ? { ...row, title } : row)),
+    );
   };
 
   const removePendingFile = (index: number) => {
-    setPendingFiles((prev) => {
-      const next = prev.filter((_, i) => i !== index);
-      if (next.length === 1) {
-        setMeta((m) => ({ ...m, title: next[0].name.replace(/\.[^.]+$/, '') }));
-      } else if (next.length === 0) {
-        setMeta((m) => ({ ...m, title: '' }));
-      }
-      return next;
-    });
+    setPendingUploads((prev) => prev.filter((_, i) => i !== index));
     if (fileRef.current) fileRef.current.value = '';
+    if (folderRef.current) folderRef.current.value = '';
   };
 
   const uploadMutation = useMutation<
@@ -319,30 +523,27 @@ export default function MaterialsPage() {
     UploadJobPayload,
     UploadMutateContext
   >({
-    mutationFn: async ({ files, meta: uploadMeta, uploadScope: scope }: UploadJobPayload) => {
-      if (!files.length) throw new Error('Choose at least one file');
+    mutationFn: async ({ pending, meta: uploadMeta, uploadScope: scope }: UploadJobPayload) => {
+      if (!pending.length) throw new Error('Choose at least one file');
       const fileResults: UploadFileResult[] = [];
       const uploadedMaterials: Material[] = [];
 
       const appendSharedMeta = (fd: FormData) => {
-        fd.append('type', uploadMeta.type);
         fd.append('academicClassId', uploadMeta.academicClassId);
         fd.append('subjectId', uploadMeta.subjectId);
         fd.append('academicSession', uploadMeta.academicSession);
+        if (uploadMeta.batchId) fd.append('batchId', uploadMeta.batchId);
         fd.append('fullBook', scope === 'FULL_BOOK' ? 'true' : 'false');
-        if (scope === 'CHAPTER' && files.length === 1 && uploadMeta.chapterId) {
+        if (scope === 'CHAPTER' && pending.length === 1 && uploadMeta.chapterId) {
           fd.append('chapterId', uploadMeta.chapterId);
         }
       };
 
-      if (files.length === 1) {
-        const file = files[0];
+      if (pending.length === 1) {
+        const { file } = pending[0];
         const fd = new FormData();
         fd.append('file', file);
-        fd.append(
-          'title',
-          uploadMeta.title.trim() ? uploadMeta.title.trim() : file.name.replace(/\.[^.]+$/, ''),
-        );
+        fd.append('title', resolvePendingTitle(pending[0]));
         appendSharedMeta(fd);
         const created = (await materialsApi.upload(accessToken!, fd)) as Material;
         uploadedMaterials.push(created);
@@ -352,23 +553,25 @@ export default function MaterialsPage() {
         };
       }
 
-      const batches = chunkFiles(files, FILES_PER_BATCH);
+      const batches = chunkPendingUploads(pending, FILES_PER_BATCH);
       setUploadProgress({ current: 0, total: batches.length });
       let completedBatches = 0;
       await runPool(batches, UPLOAD_PARALLEL_BATCHES, async (batch) => {
         const fd = new FormData();
-        for (const file of batch) fd.append('files', file);
-        fd.append('titles', batch.map((f) => f.name.replace(/\.[^.]+$/, '')).join('\n'));
+        for (const row of batch) fd.append('files', row.file);
+        fd.append('titles', batch.map((row) => resolvePendingTitle(row)).join('\n'));
         appendSharedMeta(fd);
         try {
           const batchRes = (await materialsApi.uploadBatch(accessToken!, fd)) as {
             materials?: Material[];
           };
           for (const row of batchRes.materials ?? []) uploadedMaterials.push(row);
-          for (const file of batch) fileResults.push({ fileName: file.name, ok: true });
+          for (const row of batch) fileResults.push({ fileName: row.file.name, ok: true });
         } catch (e) {
           const msg = e instanceof Error ? e.message : 'Upload failed';
-          for (const file of batch) fileResults.push({ fileName: file.name, ok: false, error: msg });
+          for (const row of batch) {
+            fileResults.push({ fileName: row.file.name, ok: false, error: msg });
+          }
         } finally {
           completedBatches += 1;
           setUploadProgress({ current: completedBatches, total: batches.length });
@@ -381,18 +584,16 @@ export default function MaterialsPage() {
       }
       return { materials: uploadedMaterials, fileResults };
     },
-    onMutate: ({ files, meta: uploadMeta }) => {
+    onMutate: ({ pending, meta: uploadMeta, uploadScope: scope }) => {
       setUploadProgress(null);
       const cls = (classes ?? []).find((c) => c.id === uploadMeta.academicClassId);
       const subjectHints = (cls?.subjects ?? []).map((s) => {
         const row = s as { id: string; name: string; code?: string };
         return { id: row.id, name: row.name, code: row.code ?? '' };
       });
-      const placeholders: Material[] = files.map((file, index) => {
-        const title =
-          uploadMeta.title.trim() && files.length === 1
-            ? uploadMeta.title.trim()
-            : file.name.replace(/\.[^.]+$/, '');
+      const placeholders: Material[] = pending.map((row, index) => {
+        const { file } = row;
+        const title = row.title.trim() || defaultTitleFromFileName(file.name);
         const guessedId = guessSubjectId(
           file.name,
           title,
@@ -403,7 +604,7 @@ export default function MaterialsPage() {
         return {
           id: `pending-upload-${index}-${file.name}-${file.lastModified}`,
           title,
-          type: uploadMeta.type,
+          type: 'NCERT',
           fileName: file.name,
           fileSize: file.size,
           mimeType: file.type || 'application/pdf',
@@ -415,6 +616,7 @@ export default function MaterialsPage() {
           subject: subject
             ? { name: subject.name, code: (subject as { code?: string }).code ?? '' }
             : null,
+          isFullBook: scope === 'FULL_BOOK',
         };
       });
       setSessionQueue((prev) => {
@@ -427,8 +629,8 @@ export default function MaterialsPage() {
         syncUploadSessionStorage(settled, sessionMaterialIdsRef.current);
         return next;
       });
-      setPendingFiles([]);
-      setMeta((m) => ({ ...m, title: '', chapterId: '' }));
+      setPendingUploads([]);
+      setMeta((m) => ({ ...m, chapterId: '' }));
       if (fileRef.current) fileRef.current.value = '';
       return { placeholders };
     },
@@ -463,6 +665,7 @@ export default function MaterialsPage() {
       queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
       queryClient.invalidateQueries({ queryKey: ['curriculum-all-classes'] });
       queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+      invalidateStudentSyllabusLive(queryClient);
       void materialsApi
         .reconcileSubjects(accessToken!)
         .then(() => {
@@ -481,9 +684,14 @@ export default function MaterialsPage() {
           variant: 'destructive',
         });
       } else if (enriched.some((m) => m.status === 'PENDING' || m.status === 'INDEXING')) {
+        for (const m of enriched) {
+          if (m.status === 'PENDING' || m.status === 'INDEXING') {
+            beginReindexWatch(m);
+          }
+        }
         toast({
           title: 'Upload complete',
-          description: 'Indexing in the background — status updates in the queue below.',
+          description: 'Indexing in the background — you will get a notification when it finishes.',
         });
       }
     },
@@ -522,8 +730,47 @@ export default function MaterialsPage() {
     if (matched.every((m) => m.status === 'READY' || m.status === 'FAILED')) {
       queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
       queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+      invalidateStudentSyllabusLive(queryClient);
     }
   }, [materials, queryClient, uploadMutation.isPending, user?.id]);
+
+  useEffect(() => {
+    if (!materials?.length) return;
+    const pending = pendingReindexRef.current;
+    if (pending.size === 0) return;
+
+    let curriculumDirty = false;
+    for (const m of materials) {
+      const entry = pending.get(m.id);
+      if (!entry) continue;
+      if (m.status === 'PENDING' || m.status === 'INDEXING') {
+        continue;
+      }
+      if (m.status === 'READY') {
+        pending.delete(m.id);
+        endReindexWatch(m.id);
+        curriculumDirty = true;
+        toast({
+          title: 'Indexing complete',
+          description: `"${entry.title}" is indexed and ready for syllabus and AI tests.`,
+          variant: 'success',
+        });
+      } else if (m.status === 'FAILED') {
+        pending.delete(m.id);
+        endReindexWatch(m.id);
+        toast({
+          title: 'Re-index failed',
+          description: m.errorMessage?.trim() || `"${entry.title}" could not be indexed.`,
+          variant: 'destructive',
+        });
+      }
+    }
+    if (curriculumDirty) {
+      void queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+      void queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+      invalidateStudentSyllabusLive(queryClient);
+    }
+  }, [materials, queryClient]);
 
   const deleteMutation = useMutation({
     mutationFn: async (materialId: string) => {
@@ -561,6 +808,7 @@ export default function MaterialsPage() {
       void queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
       void queryClient.invalidateQueries({ queryKey: ['curriculum-all-classes'] });
       void queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] });
+      invalidateStudentSyllabusLive(queryClient);
     },
     onError: (e: Error, _id, context) => {
       if (context?.previous) {
@@ -574,7 +822,8 @@ export default function MaterialsPage() {
     },
   });
 
-  const canSubmitUpload = pendingFiles.length > 0 && meta.academicClassId && meta.subjectId;
+  const uploadBlockReason = uploadBlockingReason(pendingUploads, meta);
+  const canSubmitUpload = pendingUploads.length > 0 && !uploadBlockReason;
 
   return (
     <div className="space-y-8">
@@ -596,7 +845,7 @@ export default function MaterialsPage() {
           <div>
             <p className="font-medium">Strict document-only AI</p>
             <p className="mt-1 text-muted-foreground">
-              Upload a <strong>complete book</strong> to auto-detect all chapters, or upload one or more chapter PDFs at once.
+              Upload a <strong>complete book</strong> to auto-detect all chapters.
               Classes &amp; Batches syllabus is built only from your uploads.
             </p>
           </div>
@@ -613,57 +862,103 @@ export default function MaterialsPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-5">
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
+              <Upload className="mr-2 h-4 w-4" />
+              Choose files
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => folderRef.current?.click()}>
+              <FolderOpen className="mr-2 h-4 w-4" />
+              Choose folder
+            </Button>
+          </div>
           <div
-            className="cursor-pointer rounded-xl border-2 border-dashed p-8 text-center transition-colors hover:border-primary/50"
-            onClick={() => fileRef.current?.click()}
+            className={cn(
+              'rounded-xl border-2 border-dashed p-6 transition-colors',
+              pendingUploads.length === 0 && 'cursor-pointer hover:border-primary/50',
+            )}
+            onClick={() => {
+              if (pendingUploads.length === 0) fileRef.current?.click();
+            }}
           >
-            {pendingFiles.length > 0 ? (
-              <div className="space-y-2 text-left">
-                <p className="text-center text-sm font-medium text-muted-foreground">
-                  {pendingFiles.length} file{pendingFiles.length > 1 ? 's' : ''} selected
-                  {' · '}
-                  <button
-                    type="button"
-                    className="text-primary underline-offset-2 hover:underline"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      fileRef.current?.click();
-                    }}
-                  >
-                    Add more
-                  </button>
-                </p>
-                <ul className="max-h-48 space-y-1 overflow-y-auto">
-                  {pendingFiles.map((file, index) => (
-                    <li
-                      key={`${file.name}-${file.size}-${file.lastModified}`}
-                      className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2"
+            {pendingUploads.length > 0 ? (
+              <div className="space-y-3 text-left">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium">
+                    <FolderOpen className="mr-1.5 inline h-4 w-4 text-primary" />
+                    {pendingUploads.length} document{pendingUploads.length > 1 ? 's' : ''} ready
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => fileRef.current?.click()}
                     >
-                      <FileText className="h-4 w-4 shrink-0 text-primary" />
-                      <span className="min-w-0 flex-1 truncate text-sm font-medium">{file.name}</span>
-                      <Badge variant="outline" className="shrink-0">{formatFileSize(file.size)}</Badge>
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="h-7 w-7 shrink-0"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removePendingFile(index);
-                        }}
-                      >
-                        <X className="h-4 w-4" />
-                      </Button>
+                      Add files
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => folderRef.current?.click()}
+                    >
+                      Add folder
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  <Pencil className="mr-1 inline h-3 w-3" />
+                  Edit each title before upload — used for indexing and syllabus labels.
+                </p>
+                <ul className="max-h-64 space-y-2 overflow-y-auto">
+                  {pendingUploads.map((row, index) => (
+                    <li
+                      key={pendingUploadKey(row)}
+                      className="rounded-lg border bg-background p-3"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-start gap-2">
+                        <FileText className="mt-2 h-4 w-4 shrink-0 text-primary" />
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <Label className="text-xs text-muted-foreground">Title *</Label>
+                          <Input
+                            value={row.title}
+                            className="h-9"
+                            placeholder="Document title"
+                            onChange={(e) => updatePendingTitle(index, e.target.value)}
+                          />
+                          <p className="truncate text-xs text-muted-foreground" title={row.file.name}>
+                            {row.file.name}
+                          </p>
+                        </div>
+                        <Badge variant="outline" className="mt-7 shrink-0">
+                          {formatFileSize(row.file.size)}
+                        </Badge>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="mt-6 h-7 w-7 shrink-0"
+                          onClick={() => removePendingFile(index)}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </li>
                   ))}
                 </ul>
               </div>
             ) : (
-              <>
+              <div className="py-4 text-center">
                 <BookOpen className="mx-auto h-8 w-8 text-muted-foreground" />
-                <p className="mt-2 font-medium">Choose PDF or text files</p>
-                <p className="text-sm text-muted-foreground">Select multiple files · Max 100 MB each</p>
-              </>
+                <p className="mt-2 font-medium">Drop PDFs here or use the buttons above</p>
+                <p className="text-sm text-muted-foreground">
+                  Multiple files or a whole folder · Max 100 MB each
+                </p>
+              </div>
             )}
             <input
               ref={fileRef}
@@ -675,58 +970,34 @@ export default function MaterialsPage() {
                 if (e.target.files?.length) addPendingFiles(e.target.files);
               }}
             />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 rounded-lg border bg-muted/30 p-1">
-            <button
-              type="button"
-              className={cn(
-                'rounded-md py-2 text-sm font-medium transition-colors',
-                uploadScope === 'FULL_BOOK' ? 'bg-background shadow-sm' : 'text-muted-foreground',
-              )}
-              onClick={() => setUploadScope('FULL_BOOK')}
-            >
-              Complete book
-            </button>
-            <button
-              type="button"
-              className={cn(
-                'rounded-md py-2 text-sm font-medium transition-colors',
-                uploadScope === 'CHAPTER' ? 'bg-background shadow-sm' : 'text-muted-foreground',
-              )}
-              onClick={() => setUploadScope('CHAPTER')}
-            >
-              Single chapter
-            </button>
+            <input
+              ref={folderRef}
+              type="file"
+              multiple
+              className="hidden"
+              {...({ webkitdirectory: '', directory: '' } as InputHTMLAttributes<HTMLInputElement>)}
+              onChange={(e) => {
+                if (e.target.files?.length) {
+                  const pdfs = Array.from(e.target.files).filter(
+                    (f) =>
+                      f.name.toLowerCase().endsWith('.pdf')
+                      || f.name.toLowerCase().endsWith('.txt')
+                      || f.name.toLowerCase().endsWith('.md'),
+                  );
+                  if (pdfs.length) addPendingFiles(pdfs);
+                  else {
+                    toast({
+                      title: 'No supported files',
+                      description: 'The folder must contain PDF, TXT, or Markdown files.',
+                      variant: 'destructive',
+                    });
+                  }
+                }
+              }}
+            />
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2 sm:col-span-2">
-              <Label>
-                Title
-                {pendingFiles.length > 1 && (
-                  <span className="ml-2 font-normal text-muted-foreground">(each file uses its filename)</span>
-                )}
-              </Label>
-              <Input
-                placeholder={uploadScope === 'FULL_BOOK' ? 'e.g. NCERT Social Science Class 9' : 'e.g. NCERT SST Ch.2'}
-                value={meta.title}
-                disabled={pendingFiles.length > 1}
-                onChange={(e) => setMeta({ ...meta, title: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Document type</Label>
-              <select
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                value={meta.type}
-                onChange={(e) => setMeta({ ...meta, type: e.target.value })}
-              >
-                {DOC_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </select>
-            </div>
             <div className="space-y-2">
               <Label>Class *</Label>
               <select
@@ -737,16 +1008,74 @@ export default function MaterialsPage() {
                   academicClassId: e.target.value,
                   subjectId: '',
                   chapterId: '',
+                  batchId: '',
                 })}
               >
                 <option value="">Select class</option>
                 {(classes ?? []).map((c) => (
-                  <option key={c.id} value={c.id}>Class {c.level} — {c.name}</option>
+                  <option key={c.id} value={c.id}>{formatAcademicClassLabel(c.level, c.name)}</option>
                 ))}
               </select>
             </div>
             <div className="space-y-2">
-              <Label>Subject *</Label>
+              <Label>Section</Label>
+              <select
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={meta.batchId}
+                disabled={!meta.academicClassId || sectionsForUpload.length === 0}
+                onChange={(e) => setMeta({ ...meta, batchId: e.target.value })}
+              >
+                <option value="">
+                  {sectionsForUpload.length === 0
+                    ? (
+                      meta.academicClassId
+                        ? `No sections for this class in ${meta.academicSession || 'this session'}`
+                        : 'Select a class first'
+                    )
+                    : 'All sections (shared)'}
+                </option>
+                {sectionsForUpload.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="sm:col-span-2">
+              <AcademicSessionField
+                value={meta.academicSession}
+                onChange={(academicSession) => setMeta({ ...meta, academicSession, batchId: '' })}
+                extraOptions={sessionExtraOptions}
+              />
+            </div>
+            {meta.academicClassId && sectionsForUpload.length === 0 && sessionExtraOptions.length > 0 ? (
+              <p className="sm:col-span-2 text-xs text-muted-foreground">
+                No sections for this class in the selected session. Try
+                {' '}
+                {sessionExtraOptions.slice(0, 3).join(', ')}
+                {sessionExtraOptions.length > 3 ? ', …' : ''}
+                {' '}
+                if your batches use a different year.
+              </p>
+            ) : null}
+            <p className="sm:col-span-2 text-xs text-muted-foreground">
+              Pick a section so documents appear only under that batch in Classes &amp; Batches. Leave shared for
+              NCERT books used by every section.
+            </p>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label>Subject *</Label>
+                {canManageCurriculum && meta.academicClassId && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 gap-1 px-2 text-xs"
+                    onClick={() => setAddSubjectOpen(true)}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Add subject
+                  </Button>
+                )}
+              </div>
               <select
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
                 value={meta.subjectId}
@@ -758,67 +1087,50 @@ export default function MaterialsPage() {
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
               </select>
+              {canManageCurriculum && meta.academicClassId && !(selectedClass?.subjects.length) && (
+                <p className="text-xs text-muted-foreground">
+                  No subjects yet for this class. Use Add subject to create one before uploading.
+                </p>
+              )}
             </div>
-            {uploadScope === 'FULL_BOOK' && (
-              <p className="sm:col-span-2 rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
-                Chapters will be detected from your PDF and appear in Classes &amp; Batches after indexing.
-                {pendingFiles.length > 1 && (
-                  <>
-                    {' '}
-                    Multiple files: subject is auto-detected from each file name (English, Maths, Science…); the
-                    dropdown is used only when a name is unclear.
-                  </>
-                )}
-              </p>
-            )}
-            {uploadScope === 'CHAPTER' && (
-              <p className="sm:col-span-2 rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
-                Use this mode when uploading one or more individual chapter PDFs. Chapter titles are auto-detected from each file.
-              </p>
-            )}
-            {uploadScope === 'CHAPTER' && pendingFiles.length === 1 && chapters.length > 0 && (
-            <div className="space-y-2 sm:col-span-2">
-              <Label>Link to extracted chapter (optional)</Label>
-              <select
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                value={meta.chapterId}
-                disabled={!meta.subjectId}
-                onChange={(e) => setMeta({ ...meta, chapterId: e.target.value })}
-              >
-                <option value="">Auto-detect from PDF</option>
-                {chapters.map((ch) => (
-                  <option key={ch.id} value={ch.id}>Ch. {ch.number}: {ch.title}</option>
-                ))}
-              </select>
-            </div>
-            )}
-            <div className="space-y-2 sm:col-span-2">
-              <Label>Academic session</Label>
-              <Input
-                value={meta.academicSession}
-                onChange={(e) => setMeta({ ...meta, academicSession: e.target.value })}
-              />
-            </div>
+            <p className="sm:col-span-2 rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+              Chapters will be detected from your PDF and appear in Classes &amp; Batches after indexing.
+              {pendingUploads.length > 1 && (
+                <>
+                  {' '}
+                  Multiple files: subject is auto-detected from each file name (English, Maths, Science…); the
+                  dropdown is used only when a name is unclear.
+                </>
+              )}
+            </p>
           </div>
 
+          {uploadBlockReason && pendingUploads.length > 0 ? (
+            <p className="text-sm text-amber-600">{uploadBlockReason}</p>
+          ) : null}
           <Button
             className="w-full"
             size="lg"
             disabled={!canSubmitUpload || uploadMutation.isPending}
-            onClick={() =>
+            onClick={() => {
+              const block = uploadBlockingReason(pendingUploads, meta);
+              if (block) {
+                toast({ title: 'Missing details', description: block, variant: 'destructive' });
+                return;
+              }
               uploadMutation.mutate({
-                files: [...pendingFiles],
+                pending: pendingUploads.map((row) => ({ ...row })),
                 meta: { ...meta },
-                uploadScope,
-              })
-            }
+                uploadScope: 'FULL_BOOK',
+              });
+            }}
           >
             {uploadMutation.isPending
               ? uploadProgress
                 ? `Uploading ${uploadProgress.current} of ${uploadProgress.total}…`
                 : 'Uploading…'
-              : pendingFiles.length > 1
-                ? `Upload ${pendingFiles.length} files to knowledge base`
+              : pendingUploads.length > 1
+                ? `Upload ${pendingUploads.length} files to knowledge base`
                 : 'Upload to knowledge base'}
           </Button>
         </CardContent>
@@ -833,95 +1145,203 @@ export default function MaterialsPage() {
           {sessionQueue.map((m) => {
             const placeholder = isUploadPlaceholder(m);
             return (
-            <Card key={m.id} className={cn(placeholder && 'border-amber-500/30 bg-amber-500/[0.03]')}>
-              <CardContent className="flex items-center gap-3 p-4">
-                <FileText className="h-5 w-5 shrink-0 text-primary" />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium">{m.title}</p>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {m.academicClass ? `Class ${m.academicClass.level}` : 'Untagged'}
-                    {m.subject ? ` · ${m.subject.name}` : ''}
-                    {m.chapter
-                      ? ` · Ch.${m.chapter.number} ${m.chapter.title}`
-                      : m.subject
-                        ? ' · Complete book'
-                        : ''}
-                    {' · '}{formatFileSize(m.fileSize)}
-                    {m.status === 'READY' && m.chunkCount > 0 ? ` · ${m.chunkCount} chunks` : ''}
-                  </p>
-                  {!m.subject && (
-                    <p className="text-xs text-amber-600">Missing tags — re-upload with class and subject</p>
-                  )}
-                  {m.status === 'FAILED' && m.errorMessage && (
-                    <p className="text-xs text-destructive">{m.errorMessage}</p>
-                  )}
-                </div>
-                <Badge variant={materialStatusBadgeVariant(m.status)}>
-                  {placeholder ? (
-                    <>
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      {uploadMutation.isPending ? 'Uploading…' : 'Queued…'}
-                    </>
-                  ) : (
-                    <>
-                      {(m.status === 'PENDING' || m.status === 'INDEXING') && (
+              <Card
+                key={m.id}
+                className={cn(placeholder && 'border-amber-500/30 bg-amber-500/[0.03]')}
+              >
+                <CardContent className="flex items-center gap-3 p-4">
+                  <FileText className="h-5 w-5 shrink-0 text-primary" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium">{m.title}</p>
+                    <p className="truncate text-xs text-muted-foreground">{queueItemMetaLine(m)}</p>
+                    {!m.subject && (
+                      <p className="text-xs text-amber-600">
+                        Missing tags — re-upload with class and subject
+                      </p>
+                    )}
+                    {m.status === 'FAILED' && m.errorMessage && (
+                      <p className="text-xs text-destructive">{m.errorMessage}</p>
+                    )}
+                  </div>
+                  <Badge variant={materialStatusBadgeVariant(m.status)}>
+                    {placeholder ? (
+                      <>
                         <Loader2 className="h-3 w-3 animate-spin" />
+                        {uploadMutation.isPending ? 'Uploading…' : 'Queued…'}
+                      </>
+                    ) : (
+                      <>
+                        {(m.status === 'PENDING' || m.status === 'INDEXING') && (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        )}
+                        {STATUS_LABEL[m.status] ?? m.status}
+                      </>
+                    )}
+                  </Badge>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title="View"
+                    disabled={placeholder || openingId === m.id}
+                    onClick={async () => {
+                      setOpeningId(m.id);
+                      try {
+                        await materialsApi.openFile(accessToken!, m.id);
+                      } catch (e) {
+                        toast({
+                          title: 'Could not open',
+                          description: e instanceof Error ? e.message : '',
+                          variant: 'destructive',
+                        });
+                      } finally {
+                        setOpeningId(null);
+                      }
+                    }}
+                  >
+                    {openingId === m.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title="Download"
+                    disabled={placeholder}
+                    onClick={() => materialsApi.downloadFile(accessToken!, m.id, m.fileName)}
+                  >
+                    <Download className="h-4 w-4" />
+                  </Button>
+                  {canUpload && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      title="Re-index"
+                      disabled={placeholder}
+                      onClick={async () => {
+                        try {
+                          const updated = (await materialsApi.reindex(
+                            accessToken!,
+                            m.id,
+                          )) as Partial<Material>;
+                          beginReindexWatch(m);
+                          patchMaterialOnClient(m.id, {
+                            ...updated,
+                            status: updated.status ?? 'INDEXING',
+                            errorMessage: null,
+                          });
+                          void queryClient.invalidateQueries({ queryKey: ['materials'] });
+                          void queryClient.refetchQueries({ queryKey: ['materials'] });
+                          void queryClient.invalidateQueries({ queryKey: ['curriculum-from-uploads'] });
+                          toast({
+                            title: 'Re-index in progress',
+                            description:
+                              'Extracting chapters and building the search index. You will be notified when it finishes.',
+                          });
+                        } catch (e) {
+                          toast({
+                            title: 'Re-index failed',
+                            description: e instanceof Error ? e.message : 'Failed',
+                            variant: 'destructive',
+                          });
+                        }
+                      }}
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                    </Button>
+                  )}
+                  {canDelete && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      title="Delete"
+                      disabled={
+                        placeholder
+                        || (deleteMutation.isPending && deleteMutation.variables === m.id)
+                      }
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            `Delete "${m.title}"? This removes indexed chapters for this book.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        deleteMutation.mutate(m.id);
+                      }}
+                    >
+                      {deleteMutation.isPending && deleteMutation.variables === m.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin text-destructive" />
+                      ) : (
+                        <Trash2 className="h-4 w-4 text-destructive" />
                       )}
-                      {STATUS_LABEL[m.status] ?? m.status}
-                    </>
+                    </Button>
                   )}
-                </Badge>
-                <Button size="icon" variant="ghost" title="View" disabled={placeholder || openingId === m.id} onClick={async () => {
-                  setOpeningId(m.id);
-                  try { await materialsApi.openFile(accessToken!, m.id); }
-                  catch (e) { toast({ title: 'Could not open', description: e instanceof Error ? e.message : '', variant: 'destructive' }); }
-                  finally { setOpeningId(null); }
-                }}>
-                  {openingId === m.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
-                </Button>
-                <Button size="icon" variant="ghost" title="Download" disabled={placeholder} onClick={() => materialsApi.downloadFile(accessToken!, m.id, m.fileName)}>
-                  <Download className="h-4 w-4" />
-                </Button>
-                {canUpload && (
-                <Button size="icon" variant="ghost" title="Re-index" disabled={placeholder} onClick={async () => {
-                  try {
-                    await materialsApi.reindex(accessToken!, m.id);
-                    queryClient.invalidateQueries({ queryKey: ['materials'] });
-                    toast({
-                      title: 'Re-index started',
-                      description: 'Processing in the background. Refresh status here when it shows Indexed or Failed.',
-                    });
-                  } catch (e) {
-                    toast({ title: 'Re-index failed', description: e instanceof Error ? e.message : 'Failed', variant: 'destructive' });
-                  }
-                }}>
-                  <RefreshCw className="h-4 w-4" />
-                </Button>
-                )}
-                {canDelete && (
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  title="Delete"
-                  disabled={placeholder || (deleteMutation.isPending && deleteMutation.variables === m.id)}
-                  onClick={() => {
-                    if (!window.confirm(`Delete "${m.title}"? This removes indexed chapters for this book.`)) return;
-                    deleteMutation.mutate(m.id);
-                  }}
-                >
-                  {deleteMutation.isPending && deleteMutation.variables === m.id ? (
-                    <Loader2 className="h-4 w-4 animate-spin text-destructive" />
-                  ) : (
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  )}
-                </Button>
-                )}
-              </CardContent>
-            </Card>
-          );
+                </CardContent>
+              </Card>
+            );
           })}
         </div>
       ) : null}
+
+      <Dialog open={addSubjectOpen} onOpenChange={setAddSubjectOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add subject</DialogTitle>
+            <DialogDescription>
+              {selectedClass
+                ? `Create a new subject for ${formatAcademicClassLabel(selectedClass.level, selectedClass.name)}.`
+                : 'Select a class first, then add a subject for book uploads.'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="new-subject-name">Subject name *</Label>
+              <Input
+                id="new-subject-name"
+                placeholder="e.g. Computer Science"
+                value={newSubjectName}
+                onChange={(e) => setNewSubjectName(e.target.value)}
+                disabled={!meta.academicClassId || createSubjectMutation.isPending}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="new-subject-code">Short code (optional)</Label>
+              <Input
+                id="new-subject-code"
+                placeholder="Auto-generated from name if empty"
+                value={newSubjectCode}
+                onChange={(e) => setNewSubjectCode(e.target.value.toUpperCase())}
+                disabled={!meta.academicClassId || createSubjectMutation.isPending}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setAddSubjectOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                !meta.academicClassId
+                || !newSubjectName.trim()
+                || createSubjectMutation.isPending
+              }
+              onClick={() => createSubjectMutation.mutate()}
+            >
+              {createSubjectMutation.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Saving…
+                </>
+              ) : (
+                'Add subject'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

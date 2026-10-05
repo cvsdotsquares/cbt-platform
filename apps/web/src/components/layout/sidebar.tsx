@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePermissions } from '@/hooks/use-permissions';
-import { Permission } from '@cbt/shared';
+import { Permission, SYLLABUS_MARK_PROGRESS_ENABLED } from '@cbt/shared';
 import { Logo } from './logo';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
@@ -31,7 +31,9 @@ export const teacherNav = [
   { href: '/dashboard/teacher', label: 'Home', icon: LayoutDashboard, permission: Permission.LEARNING_MANAGE, exact: true },
   { href: '/dashboard/materials', label: 'NCERT Books', icon: Upload, permission: Permission.MATERIAL_UPLOAD },
   { href: '/dashboard/syllabus', label: 'Syllabus', icon: BookOpen, permission: Permission.CURRICULUM_READ },
-  { href: '/dashboard/batches', label: 'Topic Progress', icon: School, permission: Permission.SYLLABUS_READ },
+  ...(SYLLABUS_MARK_PROGRESS_ENABLED
+    ? [{ href: '/dashboard/batches', label: 'Topic Progress', icon: School, permission: Permission.SYLLABUS_READ }]
+    : []),
   { href: '/dashboard/ai-tests', label: 'Create Class Test', icon: Sparkles, permission: Permission.AI_GENERATE_TEST },
   { href: '/dashboard/exams', label: 'Class Tests', icon: ClipboardList, permission: Permission.EXAM_READ },
   { href: '/dashboard/candidates', label: 'My Students', icon: Users, permission: Permission.CANDIDATE_READ },
@@ -39,7 +41,7 @@ export const teacherNav = [
 ];
 
 export const settingsNav = [
-  { href: '/dashboard/users', label: 'Staff & Teachers', icon: UserCog, permission: Permission.USER_READ },
+  { href: '/dashboard/users', label: 'Teachers', icon: UserCog, permission: Permission.USER_READ },
   { href: '/dashboard/permissions', label: 'Role Permissions', icon: ShieldCheck, permission: Permission.TENANT_DELETE },
   { href: '/dashboard/settings', label: 'Institute Settings', icon: Settings, permission: Permission.TENANT_READ },
 ];

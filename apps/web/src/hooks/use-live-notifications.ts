@@ -10,6 +10,7 @@ import {
 import { dashboardApi } from '@/lib/api';
 import { usePermissions } from '@/hooks/use-permissions';
 import { formatViolationLabel, Permission } from '@cbt/shared';
+import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
 
 const KYC_SEEN_KEY = 'cbt-seen-kyc-submissions';
 
@@ -77,19 +78,32 @@ type DashboardStats = {
       batchName?: string | null;
     }[];
     testsCreated?: { id: string; title: string; code: string; status: string; createdAt: string }[];
+    teacherAssignments?: {
+      id: string;
+      subjectName?: string;
+      batchName?: string;
+      className?: string;
+      classLevel?: number | null;
+      assignedAt: string;
+    }[];
   };
 };
 
 export function useLiveNotifications() {
   const accessToken = useAuthStore((s) => s.accessToken);
+  const user = useAuthStore((s) => s.user);
+  const teacherPortal = isTeacherOnly(normalizeRoles(user?.roles));
   const queryClient = useQueryClient();
   const add = useNotificationStore((s) => s.add);
+  const ensureHistory = useNotificationStore((s) => s.ensureHistory);
   const markClassWithNewStudent = useNotificationStore((s) => s.markClassWithNewStudent);
+  const pruneByTypes = useNotificationStore((s) => s.pruneByTypes);
   const { can } = usePermissions();
   const seenSubmissions = useRef(new Set<string>());
   const seenKyc = useRef(new Set<string>());
   const seenStudents = useRef(new Set<string>());
   const seenTests = useRef(new Set<string>());
+  const seenAssignments = useRef(new Set<string>());
   const seenViolations = useRef(new Set<string>());
   const violationSocketKeys = useRef(new Set<string>());
   const feedInitialized = useRef(false);
@@ -106,10 +120,29 @@ export function useLiveNotifications() {
   const canManageStudents = can(Permission.CANDIDATE_READ);
   const canReadExams = can(Permission.EXAM_READ);
   const canUseFeed =
-    canReadResults || canManageStudents || canReadExams || canViewViolations;
+    canReadResults
+    || canManageStudents
+    || canReadExams
+    || canViewViolations
+    || (teacherPortal && can(Permission.LEARNING_MANAGE));
 
   useEffect(() => {
-    if (!accessToken || !canMonitor) return;
+    feedInitialized.current = false;
+    seenSubmissions.current.clear();
+    seenKyc.current.clear();
+    seenStudents.current.clear();
+    seenTests.current.clear();
+    seenAssignments.current.clear();
+    seenViolations.current.clear();
+    violationSocketKeys.current.clear();
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (teacherPortal) pruneByTypes(['exam']);
+  }, [teacherPortal, user?.id, pruneByTypes]);
+
+  useEffect(() => {
+    if (!accessToken || !canMonitor || teacherPortal) return;
 
     let cancelled = false;
     let off: (() => void) | undefined;
@@ -150,12 +183,12 @@ export function useLiveNotifications() {
       cancelled = true;
       off?.();
     };
-  }, [accessToken, canMonitor, add]);
+  }, [accessToken, canMonitor, teacherPortal, add]);
 
   const { data } = useQuery({
-    queryKey: ['dashboard'],
+    queryKey: ['dashboard', user?.id],
     queryFn: () => dashboardApi.stats(accessToken!) as Promise<DashboardStats>,
-    enabled: !!accessToken && canUseFeed,
+    enabled: !!accessToken && !!user?.id && canUseFeed,
     staleTime: 60_000,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
@@ -164,18 +197,23 @@ export function useLiveNotifications() {
   useEffect(() => {
     if (canReadResults) {
       for (const sub of data?.recentSubmissions || []) {
-        if (!feedInitialized.current) {
-          seenSubmissions.current.add(sub.id);
-          continue;
-        }
-        if (seenSubmissions.current.has(sub.id)) continue;
-        seenSubmissions.current.add(sub.id);
-        add({
-          type: 'submission',
+        const payload = {
+          type: 'submission' as const,
           title: `${sub.candidateName} attempted a test`,
           message: sub.examTitle,
           timestamp: sub.submittedAt,
-        });
+        };
+        if (!feedInitialized.current) {
+          seenSubmissions.current.add(sub.id);
+          ensureHistory(payload);
+          continue;
+        }
+        if (seenSubmissions.current.has(sub.id)) {
+          ensureHistory(payload);
+          continue;
+        }
+        seenSubmissions.current.add(sub.id);
+        add(payload);
       }
     }
 
@@ -186,16 +224,25 @@ export function useLiveNotifications() {
       let added = false;
       for (const item of feed.kycPending) {
         const key = `${item.id}:${item.submittedAt}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        added = true;
-        add({
-          type: 'kyc',
+        const payload = {
+          type: 'kyc' as const,
           title: item.status === 'VERIFIED' ? 'KYC verified' : 'KYC pending review',
           message: `${item.candidateName} (${item.email})`,
           timestamp: item.submittedAt,
           href: `/dashboard/candidates?kycReview=${encodeURIComponent(item.id)}`,
-        });
+        };
+        if (!feedInitialized.current) {
+          seen.add(key);
+          ensureHistory(payload);
+          continue;
+        }
+        if (seen.has(key)) {
+          ensureHistory(payload);
+          continue;
+        }
+        seen.add(key);
+        added = true;
+        add(payload);
         markClassWithNewStudent(UNASSIGNED_CLASS_HIGHLIGHT);
         void queryClient.invalidateQueries({ queryKey: ['candidates'] });
         void queryClient.invalidateQueries({ queryKey: ['candidates-stats'] });
@@ -205,39 +252,75 @@ export function useLiveNotifications() {
 
     if (canManageStudents && feed?.newStudents) {
       for (const item of feed.newStudents) {
-        if (!feedInitialized.current) {
-          seenStudents.current.add(item.id);
-          continue;
-        }
-        if (seenStudents.current.has(item.id)) continue;
-        seenStudents.current.add(item.id);
-        add({
-          type: 'registration',
+        const payload = {
+          type: 'registration' as const,
           title: 'New student registered',
           message: formatRegistrationNotificationMessage(item),
           timestamp: item.registeredAt,
           href: `/dashboard/candidates?q=${encodeURIComponent(item.email)}`,
-        });
+        };
+        if (!feedInitialized.current) {
+          seenStudents.current.add(item.id);
+          ensureHistory(payload);
+          continue;
+        }
+        if (seenStudents.current.has(item.id)) {
+          ensureHistory(payload);
+          continue;
+        }
+        seenStudents.current.add(item.id);
+        add(payload);
         markClassWithNewStudent(item.academicClassId ?? UNASSIGNED_CLASS_HIGHLIGHT);
         void queryClient.invalidateQueries({ queryKey: ['candidates'] });
         void queryClient.invalidateQueries({ queryKey: ['candidates-stats'] });
       }
     }
 
-    if ((canReadResults || canReadExams) && feed?.testsCreated) {
-      for (const item of feed.testsCreated) {
+    if (teacherPortal && feed?.teacherAssignments) {
+      for (const item of feed.teacherAssignments) {
+        const classLabel = item.className
+          ?? (item.classLevel != null ? `Class ${item.classLevel}` : 'Class');
+        const payload = {
+          type: 'assignment' as const,
+          title: 'New class assignment',
+          message: `${item.subjectName ?? 'Subject'} · ${classLabel}${item.batchName ? ` · ${item.batchName}` : ''}`,
+          timestamp: item.assignedAt,
+          href: '/dashboard/batches',
+        };
         if (!feedInitialized.current) {
-          seenTests.current.add(item.id);
+          seenAssignments.current.add(item.id);
+          ensureHistory(payload);
           continue;
         }
-        if (seenTests.current.has(item.id)) continue;
-        seenTests.current.add(item.id);
-        add({
-          type: 'exam',
+        if (seenAssignments.current.has(item.id)) {
+          ensureHistory(payload);
+          continue;
+        }
+        seenAssignments.current.add(item.id);
+        add(payload);
+        void queryClient.invalidateQueries({ queryKey: ['batches'] });
+      }
+    }
+
+    if (!teacherPortal && (canReadResults || canReadExams) && feed?.testsCreated) {
+      for (const item of feed.testsCreated) {
+        const payload = {
+          type: 'exam' as const,
           title: 'Class test created',
           message: `${item.title} (${item.code}) · ${item.status}`,
           timestamp: item.createdAt,
-        });
+        };
+        if (!feedInitialized.current) {
+          seenTests.current.add(item.id);
+          ensureHistory(payload);
+          continue;
+        }
+        if (seenTests.current.has(item.id)) {
+          ensureHistory(payload);
+          continue;
+        }
+        seenTests.current.add(item.id);
+        add(payload);
       }
     }
 
@@ -245,27 +328,46 @@ export function useLiveNotifications() {
       for (const v of data?.recentViolations || []) {
         const id = String(v.id);
         const dedupeKey = violationDedupeKey(v.sessionId, v.eventType, v.occurredAt);
+        const payload = {
+          type: 'violation' as const,
+          title: `Integrity alert: ${v.label}`,
+          message: `${v.candidateName} · ${v.examTitle} · ${v.severity}`,
+          timestamp: v.occurredAt,
+        };
         if (!feedInitialized.current) {
           seenViolations.current.add(id);
           if (dedupeKey) violationSocketKeys.current.add(dedupeKey);
+          ensureHistory(payload);
           continue;
         }
-        if (seenViolations.current.has(id)) continue;
+        if (seenViolations.current.has(id)) {
+          ensureHistory(payload);
+          continue;
+        }
         if (dedupeKey && violationSocketKeys.current.has(dedupeKey)) {
           seenViolations.current.add(id);
+          ensureHistory(payload);
           continue;
         }
         seenViolations.current.add(id);
         if (dedupeKey) violationSocketKeys.current.add(dedupeKey);
-        add({
-          type: 'violation',
-          title: `Integrity alert: ${v.label}`,
-          message: `${v.candidateName} · ${v.examTitle} · ${v.severity}`,
-          timestamp: v.occurredAt,
-        });
+        add(payload);
       }
     }
 
     if (data) feedInitialized.current = true;
-  }, [data, add, markClassWithNewStudent, queryClient, canManageStudents, canReadResults, canReadExams, canViewViolations]);
+  }, [
+    data,
+    add,
+    ensureHistory,
+    markClassWithNewStudent,
+    queryClient,
+    canManageStudents,
+    canReadResults,
+    canReadExams,
+    canViewViolations,
+    teacherPortal,
+    user?.id,
+    can,
+  ]);
 }

@@ -1,14 +1,16 @@
 import { getSafeRedirectPath } from './safe-redirect';
+import { getPostLoginPath } from './dashboard-nav';
 import type { AuthUser } from '@cbt/shared';
 
 export async function syncAuthSession(
   accessToken: string,
   refreshToken: string,
+  rememberMe = false,
 ): Promise<boolean> {
   const res = await fetch('/api/auth/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ accessToken, refreshToken }),
+    body: JSON.stringify({ accessToken, refreshToken, rememberMe }),
     credentials: 'include',
   });
   if (!res.ok) {
@@ -55,11 +57,8 @@ export async function clearAuthSession(accessToken?: string | null): Promise<voi
   }).catch(() => {});
 }
 
-export function redirectAfterLogin(
-  isAdminUser: boolean,
-  redirectTo?: string | null,
-) {
+export function redirectAfterLogin(roles: unknown, redirectTo?: string | null) {
   const safe = getSafeRedirectPath(redirectTo ?? null);
-  const target = safe ?? (isAdminUser ? '/dashboard' : '/my-exams');
+  const target = safe ?? getPostLoginPath(roles);
   window.location.assign(target);
 }

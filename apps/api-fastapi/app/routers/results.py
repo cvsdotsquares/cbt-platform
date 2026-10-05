@@ -228,6 +228,9 @@ async def _backfill_missing_results(db: AsyncSession, exam_id: str) -> None:
         await evaluate_session(db, session_id)
 
 
+_PUBLISHED_EXAM_STATUSES = frozenset({"PUBLISHED", "COMPLETED"})
+
+
 async def _assert_exam(db: AsyncSession, exam_id: str, tenant_id: str):
     row = await db.execute(
         text("SELECT id FROM exams WHERE id = :id AND tenant_id = :tenant_id"),
@@ -235,6 +238,21 @@ async def _assert_exam(db: AsyncSession, exam_id: str, tenant_id: str):
     )
     if not row.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Exam not found")
+
+
+async def _assert_published_exam(db: AsyncSession, exam_id: str, tenant_id: str):
+    row = await db.execute(
+        text("SELECT id, status FROM exams WHERE id = :id AND tenant_id = :tenant_id"),
+        {"id": exam_id, "tenant_id": tenant_id},
+    )
+    exam = row.mappings().first()
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    if exam["status"] not in _PUBLISHED_EXAM_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="Results are only available for published class tests",
+        )
 
 
 @router.get("/exam/{exam_id}")
@@ -245,7 +263,7 @@ async def exam_results(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    await _assert_exam(db, exam_id, current_user.tenant_id)
+    await _assert_published_exam(db, exam_id, current_user.tenant_id)
     await _backfill_missing_results(db, exam_id)
     offset = (page - 1) * limit
     total = int(
@@ -308,7 +326,7 @@ async def export_exam_results(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    await _assert_exam(db, exam_id, current_user.tenant_id)
+    await _assert_published_exam(db, exam_id, current_user.tenant_id)
     await _backfill_missing_results(db, exam_id)
 
     rows = await db.execute(
@@ -355,7 +373,7 @@ async def exam_subjective(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    await _assert_exam(db, exam_id, current_user.tenant_id)
+    await _assert_published_exam(db, exam_id, current_user.tenant_id)
     return []
 
 
@@ -469,7 +487,7 @@ async def rank_results(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    await _assert_exam(db, exam_id, current_user.tenant_id)
+    await _assert_published_exam(db, exam_id, current_user.tenant_id)
     total = await _rank_exam_results(db, exam_id)
     return {"examId": exam_id, "totalCandidates": total}
 
@@ -480,7 +498,7 @@ async def publish_results(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    await _assert_exam(db, exam_id, current_user.tenant_id)
+    await _assert_published_exam(db, exam_id, current_user.tenant_id)
     await _rank_exam_results(db, exam_id)
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)

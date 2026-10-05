@@ -7,6 +7,7 @@ export const notificationTypeToNavHref: Record<AppNotification['type'], string> 
   kyc: '/dashboard/candidates',
   registration: '/dashboard/candidates',
   exam: '/dashboard/exams',
+  assignment: '/dashboard/batches',
 };
 
 export function countUnreadByNavHref(items: AppNotification[]): Record<string, number> {

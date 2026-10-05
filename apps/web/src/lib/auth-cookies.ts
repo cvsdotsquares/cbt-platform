@@ -7,6 +7,7 @@ export const ADMIN_FLAG_COOKIE = 'cbt-is-admin';
 
 const ACCESS_MAX_AGE = 15 * 60; // 15 minutes
 const REFRESH_MAX_AGE = 3 * 60 * 60; // 3 hours
+const REMEMBER_REFRESH_MAX_AGE = 30 * 24 * 60 * 60; // 30 days
 
 export function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';
@@ -32,8 +33,12 @@ export function accessCookieOptions() {
   return baseCookieOptions(ACCESS_MAX_AGE);
 }
 
-export function refreshCookieOptions() {
-  return baseCookieOptions(REFRESH_MAX_AGE);
+export function refreshCookieOptions(rememberMe = false) {
+  return baseCookieOptions(rememberMe ? REMEMBER_REFRESH_MAX_AGE : REFRESH_MAX_AGE);
+}
+
+export function authFlagCookieOptions(rememberMe = false) {
+  return baseCookieOptions(rememberMe ? REMEMBER_REFRESH_MAX_AGE : REFRESH_MAX_AGE);
 }
 
 export function clearCookieOptions() {

@@ -419,7 +419,7 @@ export function AiTestQuestionsReview({
       if (isOpenEnded) {
         if (!data.referenceAnswer?.trim()) {
           toast({
-            title: 'No changes applied',
+            title: 'No changes applied.',
             description: 'The AI response did not include a reference answer. Try again.',
             variant: 'destructive',
           });
@@ -441,7 +441,7 @@ export function AiTestQuestionsReview({
       const payload = extractChoicePayload(data);
       if (!payload) {
         toast({
-          title: 'No changes applied',
+          title: 'No changes applied.',
           description: 'The AI response did not include four valid options (a–d). Try again.',
           variant: 'destructive',
         });
@@ -457,7 +457,7 @@ export function AiTestQuestionsReview({
         && !answerChanged
       ) {
         toast({
-          title: 'Options unchanged',
+          title: 'Options unchanged.',
           description: 'The AI returned the same option text. Try again or tweak the question.',
           variant: 'destructive',
         });
