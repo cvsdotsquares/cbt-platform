@@ -1,8 +1,10 @@
 name: Deploy Production
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
   workflow_dispatch:
 
 concurrency:
@@ -11,9 +13,16 @@ concurrency:
 
 jobs:
   deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'
+      )
     runs-on: ubuntu-latest
-    # Repo Settings → Environments → production → Required reviewers
+
     environment: production
+
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -26,7 +35,7 @@ jobs:
             set -euo pipefail
             export CBT_APP_ROOT="${{ secrets.DEPLOY_PATH_PRODUCTION }}"
             cd "$CBT_APP_ROOT"
-            bash scripts/deploy/remote-deploy.sh production "${{ github.sha }}"
+            bash scripts/deploy/remote-deploy.sh production "${{ github.event.workflow_run.head_sha || github.sha }}"
 
       - name: Smoke check (public API)
         continue-on-error: true
