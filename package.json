@@ -4,9 +4,10 @@
   "private": true,
   "description": "Enterprise Computer Based Test Examination Management System",
   "scripts": {
-    "dev": "concurrently \"pnpm --filter @cbt/api dev\" \"pnpm --filter @cbt/web dev\"",
-    "build": "pnpm --filter @cbt/shared build && pnpm --filter @cbt/api build && pnpm --filter @cbt/web build",
-    "build:api": "pnpm --filter @cbt/shared build && pnpm --filter @cbt/api prisma:generate && pnpm --filter @cbt/api build",
+    "dev": "pnpm --filter @cbt/web dev",
+    "dev:web": "pnpm --filter @cbt/web dev",
+    "build": "pnpm --filter @cbt/shared build && pnpm --filter @cbt/web build",
+    "build:api": "echo \"Use apps/api-fastapi (Python) for the API\"",
     "build:web": "pnpm --filter @cbt/shared build && pnpm --filter @cbt/web build",
     "start:api": "pnpm --filter @cbt/api prisma:migrate:deploy && pnpm --filter @cbt/api start:prod",
     "start:web": "pnpm --filter @cbt/web start",

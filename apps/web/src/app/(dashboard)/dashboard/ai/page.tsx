@@ -52,11 +52,10 @@ export default function AiStudioPage() {
       }) as Promise<{ questions: GeneratedQuestion[]; source: string; message?: string }>,
     onSuccess: (data) => {
       setGenerated(data);
-      const sourceLabel = data.source === 'openai' ? 'OpenAI GPT' : 'Template fallback';
       toast({
-        title: data.source === 'openai' ? 'Questions generated with OpenAI' : 'Questions generated (fallback)',
-        description: data.message || sourceLabel,
-        variant: data.source === 'openai' ? 'success' : 'default',
+        title: 'Questions generated with OpenAI',
+        description: data.message ?? `Generated with ${aiStatus?.model ?? 'GPT'}.`,
+        variant: 'success',
       });
     },
     onError: (e: Error) => toast({ title: 'Generation failed', description: e.message, variant: 'destructive' }),
@@ -110,7 +109,7 @@ export default function AiStudioPage() {
             <p className="font-semibold">
               {aiStatus.openaiConfigured
                 ? `OpenAI connected (${aiStatus.model})`
-                : 'OpenAI not configured — using template fallback'}
+                : 'OpenAI not configured'}
             </p>
             <p className="text-sm text-muted-foreground">
               {aiStatus.openaiConfigured
@@ -214,10 +213,8 @@ export default function AiStudioPage() {
             <div className="space-y-4 border-t pt-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={generated.source === 'openai' ? 'default' : 'secondary'}>
-                    {generated.source === 'openai' ? 'OpenAI GPT' : 'Template Fallback'}
-                  </Badge>
-                  {generated.message && generated.source !== 'openai' && (
+                  <Badge variant="default">OpenAI GPT</Badge>
+                  {generated.message && (
                     <span className="flex items-center gap-1 text-xs text-muted-foreground">
                       <AlertCircle className="h-3.5 w-3.5" />
                       {generated.message}

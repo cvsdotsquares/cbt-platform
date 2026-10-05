@@ -10,6 +10,7 @@ from app.routers.ai import (
     _is_placeholder_reference_answer,
     _normalize_msq_answer_value,
     _resolve_chapter_ids,
+    _try_accept_ai_question_candidate,
 )
 
 
@@ -36,33 +37,50 @@ class _Db:
 
 @pytest.mark.parametrize(
     "value",
-    [["a", "c"], '["a", "c"]', "a,c", "a and c", "1,3"],
+    [["a", "c"], '["a", "c"]', "['a', 'c']", "a,c", "a and c", "1,3", "ac", "A|C"],
 )
 def test_normalize_msq_answer_value_accepts_common_provider_formats(value):
     assert _normalize_msq_answer_value(value) == ["a", "c"]
 
 
+def test_try_accept_accepts_msq_with_array_correct_answer():
+    item = {
+        "type": "MSQ",
+        "content": {"text": "Which statements about evaporation are correct? Select all that apply."},
+        "options": {"a": "A", "b": "B", "c": "C", "d": "D"},
+        "correct_answer": {"value": ["a", "c"]},
+    }
+    accepted = _try_accept_ai_question_candidate(
+        item,
+        types=["MSQ"],
+        slot_index=0,
+        seen_fingerprints=set(),
+        strict_type_order=True,
+    )
+    assert accepted is not None
+    assert accepted[1] == "MSQ"
+
+
 @pytest.mark.anyio
-async def test_generate_questions_without_indexed_context_uses_dummy_questions(monkeypatch):
+async def test_generate_questions_requires_openai_key(monkeypatch):
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
 
-    questions, source = await _generate_questions(
-        chapters=[
-            {
-                "id": "chapter-1",
-                "title": "Matter",
-                "subject_name": "Science",
-            }
-        ],
-        count=2,
-        difficulty="MEDIUM",
-        question_types=["MCQ"],
-        context_chunks=[],
-    )
+    with pytest.raises(HTTPException) as exc:
+        await _generate_questions(
+            chapters=[
+                {
+                    "id": "chapter-1",
+                    "title": "Matter",
+                    "subject_name": "Science",
+                }
+            ],
+            count=2,
+            difficulty="MEDIUM",
+            question_types=["MCQ"],
+            context_chunks=[],
+        )
 
-    assert source == "dummy"
-    assert len(questions) == 2
-    assert all(question["type"] == "MCQ" for question in questions)
+    assert exc.value.status_code == 503
 
 
 @pytest.mark.anyio
@@ -83,16 +101,16 @@ async def test_generate_questions_without_indexed_context_uses_dummy_questions(m
 async def test_generate_questions_supports_every_question_type_combination(monkeypatch, question_types):
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
 
-    questions, source = await _generate_questions(
-        chapters=[{"id": "chapter-1", "title": "Matter", "subject_name": "Science"}],
-        count=len(question_types) * 2,
-        difficulty="MEDIUM",
-        question_types=question_types,
-        context_chunks=[],
-    )
+    with pytest.raises(HTTPException) as exc:
+        await _generate_questions(
+            chapters=[{"id": "chapter-1", "title": "Matter", "subject_name": "Science"}],
+            count=len(question_types) * 2,
+            difficulty="MEDIUM",
+            question_types=question_types,
+            context_chunks=[],
+        )
 
-    assert source == "dummy"
-    assert [question["type"] for question in questions] == question_types * 2
+    assert exc.value.status_code == 503
 
 
 @pytest.mark.anyio

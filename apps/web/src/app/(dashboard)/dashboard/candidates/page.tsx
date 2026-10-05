@@ -14,7 +14,6 @@ import { DataTable, DataTableHeader, DataTableHead, DataTableRow, DataTableCell,
 import { StatCard } from '@/components/layout/stat-card';
 import { CreateCandidateDialog } from '@/components/admin/create-candidate-dialog';
 import { InviteCandidateDialog } from '@/components/admin/invite-candidate-dialog';
-import { isInviteOnlyRegistration } from '@/lib/registration-config';
 import { EditCandidateDialog, type EditableCandidate } from '@/components/admin/edit-candidate-dialog';
 import {
   ManageCandidateBatchDialog,
@@ -585,12 +584,12 @@ export default function CandidatesPage() {
         }
         badge={data?.total != null ? `${data.total} total` : 'NCERT · Classes 9–12'}
       >
-        {(canInviteStudent || (can(Permission.CANDIDATE_CREATE) && !isInviteOnlyRegistration())) && (
+        {(canInviteStudent || can(Permission.CANDIDATE_CREATE)) && (
           <div className="flex flex-wrap items-center gap-2">
             {canInviteStudent && (
               <InviteCandidateDialog accessToken={accessToken!} batches={batches ?? []} classes={sortedClasses} />
             )}
-            {can(Permission.CANDIDATE_CREATE) && !isInviteOnlyRegistration() && (
+            {can(Permission.CANDIDATE_CREATE) && (
               <CreateCandidateDialog accessToken={accessToken!} batches={batches ?? []} classes={sortedClasses} />
             )}
           </div>

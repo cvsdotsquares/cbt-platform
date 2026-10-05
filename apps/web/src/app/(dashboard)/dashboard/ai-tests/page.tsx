@@ -28,6 +28,7 @@ type SyllabusChapter = {
   number: number;
   title: string;
   status: string;
+  readableForTest?: boolean;
   topics?: { id: string; title: string; status?: string }[];
 };
 
@@ -184,7 +185,9 @@ export default function AiTestsPage() {
   }, [syllabusProgress, form.subjectId, selectedSubject]);
 
   const selectableChapters = useMemo(
-    () => subjectChapters.filter((ch) => String(ch.status ?? '').toUpperCase() === 'COMPLETED'),
+    () => subjectChapters.filter(
+      (ch) => String(ch.status ?? '').toUpperCase() === 'COMPLETED' && ch.readableForTest !== false,
+    ),
     [subjectChapters],
   );
 
@@ -340,9 +343,9 @@ export default function AiTestsPage() {
         questionCount: d.questionCount ?? 0,
       });
       toast({
-        title: d.source === 'dummy' ? 'Draft created (fallback content)' : 'Draft exam created',
+        title: 'Draft exam created',
         description: d.message ?? 'Review AI-generated questions below, then publish from Class Tests.',
-        variant: d.source === 'dummy' ? 'destructive' : 'success',
+        variant: 'success',
       });
     },
     onError: (e: Error) => toast({ title: 'Could not create test', description: e.message, variant: 'destructive' }),

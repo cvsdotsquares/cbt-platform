@@ -1,8 +1,10 @@
+import ast
 import asyncio
 import json
 import hashlib
 import logging
 import random
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -525,12 +527,136 @@ def _normalize_multiple_choice_options(raw_options: object) -> dict[str, str]:
     return options
 
 
-def _normalize_answer_value(value: object) -> object:
+def _clean_choice_label(raw: object) -> str | None:
     label_aliases = {"1": "a", "2": "b", "3": "c", "4": "d"}
+    normalized = str(raw).strip().lower().replace("option", "").strip("()[]. :-")
+    normalized = label_aliases.get(normalized, normalized)
+    return normalized if normalized in set("abcd") else None
+
+
+def _normalize_answer_value(value: object) -> object:
     if isinstance(value, list):
-        return [label_aliases.get(str(item).strip().lower(), str(item).strip().lower()) for item in value]
-    normalized = str(value).strip().lower()
-    return label_aliases.get(normalized, normalized)
+        out: list[str] = []
+        for item in value:
+            label = _clean_choice_label(item)
+            if label and label not in out:
+                out.append(label)
+        return out
+    label = _clean_choice_label(value)
+    return label or str(value).strip().lower()
+
+
+def _extract_correct_value(item: dict) -> object:
+    blob = item.get("correct_answer") or item.get("correctAnswer") or {}
+    if not isinstance(blob, dict):
+        return blob
+    for key in ("value", "values", "keys", "answers"):
+        if key in blob and blob[key] is not None:
+            return blob[key]
+    return blob.get("value")
+
+
+def _normalize_msq_answer_value(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return _normalize_answer_value(value)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return []
+        parsed: object = candidate
+        if candidate.startswith("[") and candidate.endswith("]"):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(candidate)
+                except (SyntaxError, ValueError):
+                    parsed = candidate
+        if isinstance(parsed, list):
+            return _normalize_answer_value(parsed)
+        normalized = (
+            candidate.replace(" and ", ",")
+            .replace("|", ",")
+            .replace(";", ",")
+        )
+        if "," in normalized or " " in normalized:
+            parts = [part for part in re.split(r"[,\s]+", normalized) if part]
+            return _normalize_answer_value(parts)
+        compact = normalized.lower()
+        if len(compact) >= 2 and all(ch in "abcd" for ch in compact):
+            return _normalize_answer_value(list(compact))
+        label = _clean_choice_label(compact)
+        return [label] if label else []
+    if isinstance(value, (tuple, set)):
+        return _normalize_answer_value(list(value))
+    label = _clean_choice_label(value)
+    return [label] if label else []
+
+
+def _is_valid_mcq_answer(value: object) -> bool:
+    normalized = _normalize_answer_value(value)
+    return isinstance(normalized, str) and normalized in set("abcd")
+
+
+def _is_valid_msq_answer(value: object) -> bool:
+    normalized = _normalize_msq_answer_value(value)
+    return len(normalized) >= 2 and set(normalized) <= set("abcd")
+
+
+def _build_question_from_ai_item(
+    item: dict,
+    *,
+    question_type: str,
+    chapter: dict,
+    difficulty: str,
+    index: int,
+) -> dict | None:
+    content_text = str((item.get("content") or {}).get("text", "")).strip()
+    if len(content_text) < 15:
+        return None
+    options = _normalize_multiple_choice_options(item.get("options"))
+    if question_type in {"SUBJECTIVE", "CASE_STUDY", "NUMERICAL"}:
+        options = {}
+    if question_type in {"MCQ", "MSQ"} and set(options) != set("abcd"):
+        return None
+
+    correct_answer = dict(item.get("correct_answer") or item.get("correctAnswer") or {})
+    raw_correct = _extract_correct_value(item)
+    if question_type == "MCQ":
+        if not _is_valid_mcq_answer(raw_correct):
+            return None
+        correct_answer["value"] = _normalize_answer_value(raw_correct)
+    elif question_type == "MSQ":
+        if not _is_valid_msq_answer(raw_correct):
+            return None
+        correct_answer["value"] = _normalize_msq_answer_value(raw_correct)
+    elif question_type in {"SUBJECTIVE", "CASE_STUDY", "NUMERICAL"}:
+        reference = str(raw_correct or "").strip()
+        if not reference or _is_placeholder_reference_answer(reference):
+            return None
+        correct_answer["value"] = reference
+    else:
+        correct_answer["value"] = raw_correct
+
+    if question_type in {"SUBJECTIVE", "CASE_STUDY"}:
+        from app.services.subjective_grading import extract_keywords
+
+        if not correct_answer.get("keywords"):
+            correct_answer["keywords"] = extract_keywords(correct_answer)
+
+    return {
+        "title": str(item.get("title") or f"{chapter['subject_name']}: Question {index + 1}"),
+        "type": question_type,
+        "content": {"text": content_text},
+        "options": options,
+        "correct_answer": correct_answer,
+        "marks": float(item.get("marks", 2)),
+        "negative_marks": float(item.get("negative_marks", item.get("negativeMarks", 0))),
+        "difficulty": difficulty,
+        "chapter_id": chapter["id"],
+    }
 
 
 def _is_placeholder_reference_answer(text: str) -> bool:
@@ -546,9 +672,7 @@ def _is_placeholder_reference_answer(text: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in placeholder_prefixes)
 
 
-def _generation_source_label(context_chunks: list[dict], used_fallback: bool) -> str:
-    if used_fallback or not settings.OPENAI_API_KEY.strip():
-        return "dummy"
+def _generation_source_label(context_chunks: list[dict]) -> str:
     return "rag" if context_chunks else "openai"
 
 
@@ -558,29 +682,21 @@ def _generation_success_message(source: str) -> str:
             "Draft exam generated with AI questions grounded in uploaded material. "
             "Review and edit it, then publish from Class Tests."
         )
-    if source == "openai":
-        return (
-            "Draft exam generated with OpenAI (questions and reference answers). "
-            "Upload and index books for NCERT-grounded content, then review before publishing."
-        )
     return (
-        "OpenAI was unavailable; draft exam contains type-correct fallback questions. "
-        "Edit reference answers or regenerate them with AI before publishing."
+        "Draft exam generated with OpenAI. "
+        "Upload and index books for NCERT-grounded content, then review before publishing."
     )
 
 
-def _normalize_msq_answer_value(value: object) -> object:
-    if isinstance(value, str):
-        candidate = value.strip()
-        if candidate.startswith("[") and candidate.endswith("]"):
-            try:
-                value = json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
-        if isinstance(value, str):
-            value = candidate.replace(" and ", ",")
-            value = [part.strip() for part in value.split(",") if part.strip()]
-    return _normalize_answer_value(value)
+def _require_openai_for_generation() -> None:
+    if not settings.OPENAI_API_KEY.strip():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "OPENAI_API_KEY is not configured. Add it to apps/api-fastapi/.env "
+                "to generate real AI questions (no demo or placeholder questions)."
+            ),
+        )
 
 
 def _try_accept_ai_question_candidate(
@@ -595,12 +711,14 @@ def _try_accept_ai_question_candidate(
     if not isinstance(item, dict):
         return None
 
-    correct_value = str(
-        (item.get("correct_answer") or item.get("correctAnswer") or {}).get("value", "")
-    ).strip()
+    raw_correct = _extract_correct_value(item)
     content_text = str((item.get("content") or {}).get("text", "")).strip()
 
-    if not correct_value:
+    if raw_correct is None:
+        return None
+    if isinstance(raw_correct, str) and not raw_correct.strip():
+        return None
+    if isinstance(raw_correct, list) and not raw_correct:
         return None
     if len(content_text) < 15:
         return None
@@ -617,8 +735,10 @@ def _try_accept_ai_question_candidate(
         if item_type not in allowed_types:
             return None
 
-    if item_type in {"SUBJECTIVE", "CASE_STUDY"} and _is_placeholder_reference_answer(correct_value):
-        return None
+    if item_type in {"SUBJECTIVE", "CASE_STUDY"}:
+        reference = str(raw_correct).strip()
+        if not reference or _is_placeholder_reference_answer(reference):
+            return None
 
     raw_options = item.get("options")
     looks_like_choice = item_type in {"MCQ", "MSQ"} or (
@@ -627,6 +747,10 @@ def _try_accept_ai_question_candidate(
     if looks_like_choice:
         normalized_options = _normalize_multiple_choice_options(raw_options)
         if set(normalized_options) != set("abcd"):
+            return None
+        if item_type == "MCQ" and not _is_valid_mcq_answer(raw_correct):
+            return None
+        if item_type == "MSQ" and not _is_valid_msq_answer(raw_correct):
             return None
 
     fp = _question_fingerprint(content_text)
@@ -645,12 +769,11 @@ async def _generate_questions(
     context_chunks: list[dict],
     existing_fingerprints: set[str] | None = None,
 ) -> tuple[list[dict], str]:
+    _require_openai_for_generation()
     if not chapters:
-        return [], "dummy"
+        raise HTTPException(status_code=400, detail="No chapters selected for AI question generation.")
     difficulty = (difficulty or "MEDIUM").upper()
     types = _normalize_question_types(question_types)
-    if not settings.OPENAI_API_KEY.strip():
-        return _dummy_questions(chapters, count, difficulty, types), "dummy"
 
     topics = ", ".join(f'{chapter["subject_name"]}: {chapter["title"]}' for chapter in chapters)
     if context_chunks:
@@ -698,7 +821,10 @@ async def _generate_questions(
         "source_context": context,
         "requirements": {
             "MCQ": "exactly four options a,b,c,d and one correct answer",
-            "MSQ": "exactly four options a,b,c,d and at least two correct answers",
+            "MSQ": (
+                "exactly four options a,b,c,d; correct_answer.value MUST be a JSON array "
+                'with at least two distinct keys from ["a","b","c","d"] (example: ["a","c"])'
+            ),
             "NUMERICAL": "a numerical answer in correct_answer.value and no options",
             "SUBJECTIVE": "an open-ended question with a full reference answer and rubric",
             "CASE_STUDY": "a case-based open-ended question with a full reference answer and rubric",
@@ -717,7 +843,7 @@ async def _generate_questions(
 
     seen_fingerprints = set(existing_fingerprints or ())
     items: list[tuple[dict, str]] = []
-    max_attempts = 8
+    max_attempts = 12
 
     try:
         for attempt in range(max_attempts):
@@ -795,17 +921,25 @@ async def _generate_questions(
             detail=_ai_provider_error_detail("question", exc),
         ) from exc
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException) as exc:
-        logger.warning("OpenAI unreachable (%s); using offline fallback questions", exc)
-        return _dummy_questions(chapters, count, difficulty, types), "dummy"
+        logger.error("OpenAI unreachable during question generation: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI is unreachable. Check OPENAI_API_KEY, network, and OPENAI_BASE_URL, then try again.",
+        ) from exc
     except (httpx.HTTPError, KeyError, TypeError, IndexError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning("AI question generation error (%s); using offline fallback questions", exc)
-        return _dummy_questions(chapters, count, difficulty, types), "dummy"
+        logger.error("AI question generation failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenAI returned an invalid question payload. Try again or reduce question count/types. ({exc})",
+        ) from exc
 
-    used_fallback_padding = False
     if len(items) < count:
-        logger.warning(
-            "AI test gen: exhausted %d attempts, only got %d/%d questions; padding remainder",
-            max_attempts, len(items), count,
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"OpenAI produced only {len(items)} of {count} valid questions after {max_attempts} attempts. "
+                "Try a lower question count, fewer types (e.g. MCQ + SUBJECTIVE), or retry."
+            ),
         )
 
     items = items[:count]
@@ -813,53 +947,24 @@ async def _generate_questions(
     questions: list[dict] = []
     for index, (item, question_type) in enumerate(items):
         chapter = chapters[index % len(chapters)]
-        content_text = str((item.get("content") or {}).get("text", "")).strip()
-        options = _normalize_multiple_choice_options(item.get("options"))
-        if question_type in {"SUBJECTIVE", "CASE_STUDY", "NUMERICAL"}:
-            options = {}
-        if question_type in {"MCQ", "MSQ"} and set(options) != set("abcd"):
-            raise HTTPException(status_code=502, detail="AI returned incomplete multiple-choice options")
-        correct_answer = item.get("correct_answer") or item.get("correctAnswer") or {}
-        correct_value = correct_answer.get("value")
-        if question_type == "MCQ":
-            correct_value = _normalize_answer_value(correct_value)
-            correct_answer["value"] = correct_value
-        elif question_type == "MSQ":
-            correct_value = _normalize_msq_answer_value(correct_value)
-            correct_answer["value"] = correct_value
-        if question_type == "MCQ" and correct_value not in set("abcd"):
-            raise HTTPException(status_code=502, detail="AI returned an invalid MCQ answer")
-        if question_type == "MSQ":
-            if not isinstance(correct_value, list) or len(set(correct_value)) < 2 or not set(correct_value) <= set("abcd"):
-                raise HTTPException(status_code=502, detail="AI returned an invalid MSQ answer")
-        if question_type in {"SUBJECTIVE", "CASE_STUDY", "NUMERICAL"} and not str(correct_value or "").strip():
-            raise HTTPException(status_code=502, detail="AI returned an empty reference answer")
-        if question_type in {"SUBJECTIVE", "CASE_STUDY"} and _is_placeholder_reference_answer(str(correct_value)):
-            raise HTTPException(status_code=502, detail="AI returned a placeholder reference answer")
-        if question_type in {"SUBJECTIVE", "CASE_STUDY"}:
-            from app.services.subjective_grading import extract_keywords
-
-            if not correct_answer.get("keywords"):
-                correct_answer["keywords"] = extract_keywords(correct_answer)
-        questions.append(
-            {
-                "title": str(item.get("title") or f"{chapter['subject_name']}: Question {index + 1}"),
-                "type": question_type,
-                "content": {"text": content_text},
-                "options": options,
-                "correct_answer": correct_answer,
-                "marks": float(item.get("marks", 2)),
-                "negative_marks": float(item.get("negative_marks", item.get("negativeMarks", 0))),
-                "difficulty": difficulty,
-                "chapter_id": chapter["id"],
-            }
+        built = _build_question_from_ai_item(
+            item,
+            question_type=question_type,
+            chapter=chapter,
+            difficulty=difficulty,
+            index=index,
         )
-    if len(questions) < count:
-        used_fallback_padding = True
-        questions.extend(_dummy_questions(chapters, count, difficulty, types)[len(questions) : count])
-    generation_source = _generation_source_label(
-        context_chunks, used_fallback=used_fallback_padding
-    )
+        if built is None:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"OpenAI returned a {question_type} question that failed validation. "
+                    "Try again or adjust question types."
+                ),
+            )
+        questions.append(built)
+
+    generation_source = _generation_source_label(context_chunks)
     return questions, generation_source
 
 
@@ -1138,7 +1243,7 @@ async def _generate_reference_answer_payload(
                 raise HTTPException(status_code=502, detail="AI returned an invalid MCQ answer key")
         else:
             value = _normalize_msq_answer_value(value)
-            if not isinstance(value, list) or len(set(value)) < 2 or not set(value) <= set("abcd"):
+            if not _is_valid_msq_answer(value):
                 raise HTTPException(status_code=502, detail="AI returned an invalid MSQ answer key")
         return {"options": normalized_options, "correctAnswer": {"value": value}}
 
@@ -1529,9 +1634,7 @@ async def create_ai_test(
         if body.assign_to_batch:
             await _assign_batch_candidates(db, exam_id, body.batch_id, now)
 
-        if "dummy" in generation_sources:
-            overall_source = "dummy"
-        elif context_used:
+        if context_used:
             overall_source = "rag"
         else:
             overall_source = "openai"

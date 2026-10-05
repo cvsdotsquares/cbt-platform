@@ -18,6 +18,7 @@ function lanDevOrigins() {
 }
 
 const nextConfig = {
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   transpilePackages: ['@cbt/shared'],
   eslint: { ignoreDuringBuilds: false },
   typescript: { ignoreBuildErrors: false },
@@ -34,5 +35,6 @@ const nextConfig = {
   },
 } as NextConfig;
 
+console.log('nextConfig', nextConfig);
 export default nextConfig;
 
