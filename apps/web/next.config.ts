@@ -35,5 +35,6 @@ const nextConfig = {
   },
 } as NextConfig;
 
+console.log('nextConfig', nextConfig);
 export default nextConfig;
 
