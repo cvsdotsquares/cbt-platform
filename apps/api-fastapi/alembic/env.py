@@ -38,10 +38,10 @@ if config.config_file_name is not None:
 # Set the target metadata
 target_metadata = Base.metadata
 
-# Set the database URL from settings
+# ConfigParser treats % as interpolation; URL-encoded passwords (e.g. %23) must be doubled.
 config.set_main_option(
     "sqlalchemy.url",
-    settings.DATABASE_URL,
+    settings.DATABASE_URL.replace("%", "%%"),
 )
 
 # ---------------------------------------------------------

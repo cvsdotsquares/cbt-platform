@@ -136,6 +136,11 @@ export default function AiTestsPage() {
     const levelsWithBatches = new Set(sortedBatches.map((b) => b.academicClass.level));
     const fromCurriculum = [...(classes ?? [])]
       .filter((c) => levelsWithBatches.has(c.level))
+      .map((c) => ({
+        id: c.id,
+        level: c.level,
+        name: `Class ${c.level}`,
+      }))
       .sort((a, b) => a.level - b.level);
     if (fromCurriculum.length) return fromCurriculum;
     const seen = new Set<number>();

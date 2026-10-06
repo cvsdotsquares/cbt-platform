@@ -18,26 +18,21 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Restore users.is_active that was dropped by add_candidate_models migration
-    op.add_column(
-        'users',
-        sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.true()),
+    # Idempotent — demo DBs may already have some columns from Prisma / partial migrates
+    op.execute(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active "
+        "BOOLEAN NOT NULL DEFAULT true"
     )
-
-    # Add roles.is_active that is defined in the Role model but missing from the DB
-    op.add_column(
-        'roles',
-        sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.true()),
+    op.execute(
+        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_active "
+        "BOOLEAN NOT NULL DEFAULT true"
     )
-
-    # Add roles.description that is defined in the Role model but missing from the DB
-    op.add_column(
-        'roles',
-        sa.Column('description', sa.String(length=255), nullable=True),
+    op.execute(
+        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS description VARCHAR(255)"
     )
 
 
 def downgrade() -> None:
     op.drop_column('roles', 'description')
-    op.drop_column('roles', 'is_active')
+    op.drop_column('roles', 'is_active')x
     op.drop_column('users', 'is_active')

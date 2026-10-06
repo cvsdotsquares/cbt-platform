@@ -10,6 +10,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 
+def _strip_prisma_url_suffix(url: str) -> str:
+    """Remove Prisma-only query params (e.g. ?schema=public) — psycopg rejects them."""
+    if not url or "?" not in url:
+        return url
+    return url.split("?", 1)[0]
+
+
 class Settings(BaseSettings):
     # ============================================================
     # APPLICATION - UPPERCASE (from .env)
@@ -242,6 +249,9 @@ class Settings(BaseSettings):
             raise ValueError(
                 "BCRYPT_ROUNDS must be between 4 and 31."
             )
+
+        self.DATABASE_URL = _strip_prisma_url_suffix(self.DATABASE_URL)
+        self.ASYNC_DATABASE_URL = _strip_prisma_url_suffix(self.ASYNC_DATABASE_URL)
 
         return self
 

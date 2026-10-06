@@ -8,6 +8,6 @@ export const TENANT_BRANDING_COLOR_PRESETS = [
   { label: 'Rose', value: '#e11d48' },
   { label: 'Amber', value: '#d97706' },
   { label: 'Slate', value: '#475569' },
-  { label: 'White', value: '#ffffff' }
+  { label: 'White', value: '#ffffff' },
   { label: 'Grey', value: '#6b7280' },
 ] as const;

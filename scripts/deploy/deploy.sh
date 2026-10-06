@@ -12,7 +12,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 export CBT_APP_ROOT="$ROOT_DIR"
 
-ECOSYSTEM="infra/deploy/pm2/ecosystem.cjs"
+ECOSYSTEM="infra/deploy/pm2/ecosystem.config.cjs"
 if [[ ! -f "$ECOSYSTEM" ]]; then
   echo "ERROR: missing $ECOSYSTEM"
   exit 1
@@ -30,21 +30,28 @@ if [[ ! -f apps/web/.env.production ]]; then
   exit 1
 fi
 
-export NODE_ENV=production
+# PM2 ports (demo: CBT_WEB_PORT=5070 CBT_API_PORT=5071). API .env API_PORT is fallback for API only.
+if [[ -z "${CBT_API_PORT:-}" ]] && grep -qE '^API_PORT=' "$API_ENV"; then
+  CBT_API_PORT="$(grep -E '^API_PORT=' "$API_ENV" | cut -d= -f2- | tr -d '\r')"
+  export CBT_API_PORT
+fi
 
-# Load public build-time vars for Next.js
+echo "==> Installing Node dependencies (devDependencies needed for tsc/next build)"
+corepack enable >/dev/null 2>&1 || true
+corepack prepare pnpm@9.15.4 --activate
+export CI=true
+# Install before sourcing .env.production (NODE_ENV=production there + CI=true would omit devDeps).
+# --prod=false: required when CI=true or production NODE_ENV is set in the shell.
+NODE_ENV=development pnpm install --frozen-lockfile --ignore-scripts --prod=false
+
+echo "==> Building shared + Web"
+export NODE_ENV=production
+pnpm exec tsc -p packages/shared/tsconfig.json
+# Next.js reads apps/web/.env.production at build time; export NEXT_PUBLIC_* if present.
 set -a
 # shellcheck disable=SC1091
 source apps/web/.env.production
 set +a
-
-echo "==> Installing Node dependencies"
-corepack enable >/dev/null 2>&1 || true
-corepack prepare pnpm@9.15.4 --activate
-pnpm install --frozen-lockfile
-
-echo "==> Building shared + Web"
-pnpm --filter @cbt/shared build
 pnpm --filter @cbt/web build
 
 echo "==> Python API (FastAPI)"
@@ -74,7 +81,9 @@ mkdir -p apps/api-fastapi/uploads/materials
 
 echo "==> Reloading PM2 ($ECOSYSTEM)"
 if command -v pm2 >/dev/null 2>&1; then
-  pm2 startOrReload "$ECOSYSTEM" --update-env
+  # startOrReload can fail on some global PM2 + Node combos; delete + start is reliable.
+  pm2 delete cbt-api cbt-web 2>/dev/null || true
+  pm2 start "$ROOT_DIR/$ECOSYSTEM" --update-env
   pm2 save
 else
   echo "WARNING: pm2 not found. Install with: npm i -g pm2"
@@ -83,6 +92,8 @@ fi
 
 echo "==> Smoke check (local)"
 API_PORT="${CBT_API_PORT:-4010}"
+WEB_PORT="${CBT_WEB_PORT:-3010}"
+echo "    (API :${API_PORT}, Web :${WEB_PORT})"
 
 for i in 1 2 3 4 5 6 7 8 9 10; do
   if curl -sf "http://127.0.0.1:${API_PORT}/api/v1/health" >/dev/null; then

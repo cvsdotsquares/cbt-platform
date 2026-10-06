@@ -58,12 +58,12 @@ function batchListSectionSortOrder(batch: {
 export function compareBatchesForList(
   a: {
     name: string;
-    academicYear: string;
+    academicYear?: string;
     academicClass: { level: number; name: string };
   },
   b: {
     name: string;
-    academicYear: string;
+    academicYear?: string;
     academicClass: { level: number; name: string };
   },
 ): number {
@@ -79,7 +79,7 @@ export function compareBatchesForList(
   });
   if (titleDiff !== 0) return titleDiff;
 
-  return a.academicYear.localeCompare(b.academicYear, undefined, { numeric: true });
+  return (a.academicYear ?? '').localeCompare(b.academicYear ?? '', undefined, { numeric: true });
 }
 
 export function batchSectionKey(batch: { name: string; academicClass: { level: number; name: string } }): string {
