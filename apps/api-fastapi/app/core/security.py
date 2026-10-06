@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 import sys
 import uuid
@@ -15,12 +16,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import noload
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
-from app.models.user_role import UserRole
+logger = logging.getLogger(__name__)
 
 if sys.platform == "win32":
     import asyncio
@@ -188,12 +189,7 @@ ROLE_PERMISSIONS["EXAM_CREATOR"] = [
 
 
 def loaded_role_names(user: User) -> list[str]:
-    """Read role names already eager-loaded on the user.
-
-    Do not touch User.roles here. That relationship is lazy="select",
-    which issues a sync SQL query and raises MissingGreenlet under asyncio.
-    get_current_user already selectinload()s user_roles -> role.
-    """
+    """Read role names if already present on the user instance (in-memory only)."""
     names: list[str] = []
     for user_role in getattr(user, "user_roles", None) or []:
         role = getattr(user_role, "role", None)
@@ -201,6 +197,24 @@ def loaded_role_names(user: User) -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+async def fetch_role_names_for_user(db: AsyncSession, user_id: str) -> list[str]:
+    """Load role names via SQL (avoids ORM selectin on user_roles/roles)."""
+    result = await db.execute(
+        text(
+            """
+            SELECT r.name
+            FROM user_roles ur
+            JOIN roles r ON r.id::text = ur.role_id::text
+            WHERE ur.user_id::text = :user_id
+              AND r.is_active = TRUE
+            ORDER BY r.name
+            """
+        ),
+        {"user_id": str(user_id)},
+    )
+    return [str(row[0]) for row in result.all() if row[0]]
 
 
 def get_permissions_for_roles(roles: list[str]) -> list[str]:
@@ -408,9 +422,7 @@ async def get_current_user_optional(
 
         result = await db.execute(
             select(User)
-            .options(
-                selectinload(User.user_roles).selectinload(UserRole.role),
-            )
+            .options(noload(User.user_roles))
             .where(
                 User.id == str(user_id),
                 User.is_active == True,
@@ -419,7 +431,8 @@ async def get_current_user_optional(
 
         return result.scalar_one_or_none()
 
-    except Exception:
+    except Exception as exc:
+        logger.warning("JWT optional auth failed: %s", exc)
         return None
 
 
@@ -443,6 +456,7 @@ async def get_current_user(
         raise credentials_exception
 
     token = credentials.credentials
+    user_id: str | None = None
 
     try:
         payload = jwt.decode(
@@ -451,16 +465,14 @@ async def get_current_user(
             algorithms=[settings.JWT_ALGORITHM],
         )
 
-        user_id: str = payload.get("sub")
+        user_id = payload.get("sub")
 
         if not user_id:
             raise credentials_exception
 
         result = await db.execute(
             select(User)
-            .options(
-                selectinload(User.user_roles).selectinload(UserRole.role),
-            )
+            .options(noload(User.user_roles))
             .where(
                 User.id == str(user_id),
                 User.is_active == True,
@@ -470,6 +482,7 @@ async def get_current_user(
         user = result.scalar_one_or_none()
 
         if user is None:
+            logger.warning("JWT valid but user missing/inactive: sub=%s", user_id)
             raise credentials_exception
 
         return user
@@ -477,8 +490,13 @@ async def get_current_user(
     except HTTPException:
         raise
 
-    except Exception:
-        raise credentials_exception
+    except JWTError as exc:
+        logger.warning("JWT decode failed: %s", exc)
+        raise credentials_exception from exc
+
+    except Exception as exc:
+        logger.warning("JWT auth failed for sub=%s: %s", user_id, exc)
+        raise credentials_exception from exc
 
 
 class TenantContext(NamedTuple):
@@ -558,12 +576,11 @@ def require_role(required_roles: list[str] | str):
 
     async def role_checker(
         current_user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
     ) -> User:
 
-        user_roles = [
-            name.strip().upper()
-            for name in loaded_role_names(current_user)
-        ]
+        role_names = await fetch_role_names_for_user(db, str(current_user.id))
+        user_roles = [name.strip().upper() for name in role_names]
 
         # Match any directly or through admin alias
         has_matching_role = any(
@@ -615,7 +632,7 @@ def require_permission(required_permissions: list[str] | str):
         db: AsyncSession = Depends(get_db),
     ) -> User:
 
-        user_roles = loaded_role_names(current_user)
+        user_roles = await fetch_role_names_for_user(db, str(current_user.id))
 
         from app.services.role_permission_matrix import effective_permissions_for_user
 

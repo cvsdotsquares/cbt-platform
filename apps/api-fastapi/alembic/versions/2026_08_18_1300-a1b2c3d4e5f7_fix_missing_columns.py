@@ -34,5 +34,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column('roles', 'description')
-    op.drop_column('roles', 'is_active')x
+    op.drop_column('roles', 'is_active')
     op.drop_column('users', 'is_active')

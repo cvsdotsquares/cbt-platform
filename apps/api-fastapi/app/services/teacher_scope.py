@@ -5,18 +5,24 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import loaded_role_names
+from app.core.security import fetch_role_names_for_user, loaded_role_names
+from app.models.user import User
 
 ELEVATED_ROLES = frozenset(
     {"SUPER_ADMIN", "ORG_ADMIN", "EXAM_MANAGER", "ADMIN"}
 )
 
 
-def is_teacher_scoped(user) -> bool:
-    roles = {r.upper() for r in loaded_role_names(user)}
+def is_teacher_scoped(user, role_names: list[str] | None = None) -> bool:
+    roles = {r.upper() for r in (role_names if role_names is not None else loaded_role_names(user))}
     if "TEACHER" not in roles:
         return False
     return not any(r in ELEVATED_ROLES for r in roles)
+
+
+async def is_teacher_scoped_user(db: AsyncSession, user: User) -> bool:
+    role_names = await fetch_role_names_for_user(db, str(user.id))
+    return is_teacher_scoped(user, role_names)
 
 
 async def get_teacher_subject_ids(db: AsyncSession, user_id: str, batch_id: str) -> list[str]:

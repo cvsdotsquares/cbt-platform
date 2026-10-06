@@ -1,35 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchWithColdStartRetry } from '@/lib/cold-start-retry';
 import { ACCESS_TOKEN_COOKIE } from '@/lib/auth-cookies';
-
-function resolveApiBase(): string {
-  if (process.env.API_PROXY_URL?.trim()) {
-    return process.env.API_PROXY_URL.trim().replace(/\/$/, '');
-  }
-  const publicUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
-  if (publicUrl) {
-    return publicUrl.replace(/\/api\/v1\/?$/i, '').replace(/\/$/, '');
-  }
-  if (process.env.NODE_ENV === 'production') {
-    return 'https://cbt-api-ktkr.onrender.com';
-  }
-  // Local monorepo default: FastAPI (books upload, exams, proctoring live, etc.)
-  return 'http://localhost:8000';
-}
-
-const API_BASE = resolveApiBase();
-
-function isLocalApiBase(base: string): boolean {
-  try {
-    const { hostname } = new URL(base);
-    return hostname === 'localhost' || hostname === '127.0.0.1';
-  } catch {
-    return false;
-  }
-}
+import { isLocalApiProxyBase, resolveApiProxyBase } from '@/lib/api-proxy-base';
 
 async function fetchUpstream(targetUrl: string, init: RequestInit): Promise<Response> {
-  if (isLocalApiBase(API_BASE)) {
+  const apiBase = resolveApiProxyBase();
+  if (isLocalApiProxyBase(apiBase)) {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -48,7 +24,8 @@ async function fetchUpstream(targetUrl: string, init: RequestInit): Promise<Resp
 
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const path = pathSegments.join('/');
-  const targetUrl = `${API_BASE}/api/v1/${path}${req.nextUrl.search}`;
+  const apiBase = resolveApiProxyBase();
+  const targetUrl = `${apiBase}/api/v1/${path}${req.nextUrl.search}`;
 
   const contentType = req.headers.get('content-type') || '';
   const isMultipart = contentType.includes('multipart/form-data');
@@ -61,11 +38,12 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
     headers.set(key, value);
   });
 
-  if (!headers.has('authorization')) {
-    const accessToken = req.cookies.get(ACCESS_TOKEN_COOKIE)?.value;
-    if (accessToken) {
-      headers.set('authorization', `Bearer ${accessToken}`);
-    }
+  const cookieAccessToken = req.cookies.get(ACCESS_TOKEN_COOKIE)?.value;
+  // Prefer HttpOnly cookie over client Authorization (stale Zustand tokens after redeploy).
+  if (cookieAccessToken) {
+    headers.set('authorization', `Bearer ${cookieAccessToken}`);
+  } else if (!headers.has('authorization')) {
+    // no cookie — forward client header if present
   }
 
   let requestBody: BodyInit | undefined;

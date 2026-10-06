@@ -36,6 +36,7 @@ function createApps(apiPort, webPort) {
         NODE_ENV: 'production',
         PORT: String(webPort),
         HOSTNAME: '127.0.0.1',
+        API_PROXY_URL: `http://127.0.0.1:${apiPort}`,
       },
     },
   ];

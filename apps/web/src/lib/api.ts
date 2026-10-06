@@ -3,6 +3,7 @@ import { fetchWithColdStartRetry as fetchWithBackoff } from './cold-start-retry'
 import { formatApiErrorPayload } from '@/lib/format-error-message';
 import { INSTITUTE_ADMIN_ENABLED, isAdmin, isCandidate, normalizeRoles } from './roles';
 import type { AuthUser } from '@cbt/shared';
+import { tenantIdForRequestHeader } from '@/lib/tenant-header';
 
 const RENDER_API_BASE =
   process.env.API_PROXY_URL || 'https://cbt-api-ktkr.onrender.com';
@@ -55,9 +56,10 @@ function getMaterialsBatchUploadUrl(): string {
 async function postMaterialsFormData(token: string, requestUrl: string, formData: FormData) {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
-    'X-Tenant-ID': getAuthTenantId(),
     'X-Device-Fingerprint': getFingerprint(),
   };
+  const tenantHeader = tenantIdForRequestHeader(getAuthTenantId());
+  if (tenantHeader) headers['X-Tenant-ID'] = tenantHeader;
   const useColdStartRetry = typeof window !== 'undefined' && !isLocalDevHost();
 
   let res: Response;
@@ -405,7 +407,10 @@ export async function apiFetch<T>(endpoint: string, options: ApiOptions = {}): P
     authToken = useAuthStore.getState().accessToken ?? undefined;
   }
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-  headers['X-Tenant-ID'] = skipAuth ? getTenantId() : getAuthTenantId();
+  const tenantHeader = tenantIdForRequestHeader(
+    skipAuth ? getTenantId() : getAuthTenantId(),
+  );
+  if (tenantHeader) headers['X-Tenant-ID'] = tenantHeader;
 
   const requestUrl = `${getApiUrl()}${endpoint}`;
   const useColdStartRetry = typeof window !== 'undefined' && !isLocalDevHost();
@@ -468,6 +473,16 @@ async function apiFetchWithAiRetry<T>(
 
 function authHeaders(token: string) {
   return { token, headers: { 'X-Device-Fingerprint': getFingerprint() } };
+}
+
+function bearerFetchHeaders(token: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'X-Device-Fingerprint': getFingerprint(),
+  };
+  const tenantHeader = tenantIdForRequestHeader(getAuthTenantId());
+  if (tenantHeader) headers['X-Tenant-ID'] = tenantHeader;
+  return headers;
 }
 
 export function getFingerprint() {
@@ -807,10 +822,11 @@ export const resultsApi = {
     apiFetch<Paginated<ExamResultListItem>>(`/results/exam/${examId}`, authHeaders(token)),
   exportCsv: async (token: string, examId: string) => {
     const url = `${getApiUrl()}/results/exam/${examId}/export`;
-    const headers = {
+    const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
-      'X-Tenant-ID': getAuthTenantId(),
     };
+    const tenantHeader = tenantIdForRequestHeader(getAuthTenantId());
+    if (tenantHeader) headers['X-Tenant-ID'] = tenantHeader;
     const useRetry = typeof window !== 'undefined' && !isLocalDevHost();
     const res = useRetry
       ? await fetchWithColdStartRetry(url, { headers, credentials: 'include' })
@@ -1097,11 +1113,7 @@ export const materialsApi = {
   openFile: async (token: string, id: string) => {
     const url = `${getApiUrl()}/materials/${id}/file`;
     const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'X-Tenant-ID': getAuthTenantId(),
-        'X-Device-Fingerprint': getFingerprint(),
-      },
+      headers: bearerFetchHeaders(token),
       credentials: 'include',
     });
     if (!res.ok) {
@@ -1122,11 +1134,7 @@ export const materialsApi = {
   createFileObjectUrl: async (token: string, id: string) => {
     const url = `${getApiUrl()}/materials/${id}/file`;
     const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'X-Tenant-ID': getAuthTenantId(),
-        'X-Device-Fingerprint': getFingerprint(),
-      },
+      headers: bearerFetchHeaders(token),
       credentials: 'include',
     });
     if (!res.ok) {
@@ -1145,11 +1153,7 @@ export const materialsApi = {
   downloadFile: async (token: string, id: string, fileName: string) => {
     const url = `${getApiUrl()}/materials/${id}/file?download=1`;
     const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'X-Tenant-ID': getAuthTenantId(),
-        'X-Device-Fingerprint': getFingerprint(),
-      },
+      headers: bearerFetchHeaders(token),
       credentials: 'include',
     });
     if (!res.ok) {

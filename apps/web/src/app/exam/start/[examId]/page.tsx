@@ -406,7 +406,7 @@ export default function ExamStartPage() {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
-          'X-Tenant-ID': user?.tenantId || 'default',
+          ...(user?.tenantId ? { 'X-Tenant-ID': user.tenantId } : {}),
         },
         body: JSON.stringify({ answers: pending }),
         keepalive: true,

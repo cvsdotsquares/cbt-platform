@@ -14,6 +14,7 @@ from app.core.tenant import DEFAULT_TENANT_ID
 from app.core.security import (
     create_access_token,
     create_refresh_token,
+    fetch_role_names_for_user,
     get_current_user,
     get_password_hash,
     verify_password,
@@ -594,10 +595,9 @@ async def effective_permissions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from app.core.security import loaded_role_names
     from app.services.role_permission_matrix import effective_permissions_for_user
 
-    roles = loaded_role_names(current_user)
+    roles = await fetch_role_names_for_user(db, str(current_user.id))
     permissions, customized = await effective_permissions_for_user(
         db,
         str(current_user.tenant_id) if current_user.tenant_id else None,
@@ -616,15 +616,11 @@ async def effective_permissions(
     response_model=UserResponse,
 )
 async def get_current_user_info(
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Any:
 
-    roles = [
-        user_role.role.name
-        for user_role in current_user.user_roles
-        if user_role.role and user_role.role.is_active
-    ]
-
+    roles = await fetch_role_names_for_user(db, str(current_user.id))
     role = roles[0] if roles else "user"
 
     return UserResponse(

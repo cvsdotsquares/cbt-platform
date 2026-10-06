@@ -11,12 +11,8 @@ import {
   verifyAccessToken,
 } from '@/lib/auth-cookies';
 import { isAdmin, normalizeRoles } from '@/lib/roles';
-
-const API_BASE = (
-  process.env.API_PROXY_URL
-  || process.env.NEXT_PUBLIC_API_URL
-  || (process.env.NODE_ENV === 'production' ? 'https://cbt-api-ktkr.onrender.com' : 'http://localhost:8000')
-).replace(/\/$/, '');
+import { resolveApiProxyBase } from '@/lib/api-proxy-base';
+import { tenantIdForRequestHeader } from '@/lib/tenant-header';
 
 export async function POST() {
   const cookieStore = await cookies();
@@ -26,13 +22,16 @@ export async function POST() {
     return NextResponse.json({ error: 'No refresh token' }, { status: 401 });
   }
 
-  const tenantId = process.env.NEXT_PUBLIC_TENANT_ID || 'default';
+  const apiBase = resolveApiProxyBase();
+  const tenantHeader = tenantIdForRequestHeader(process.env.NEXT_PUBLIC_TENANT_ID);
+  const refreshHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (tenantHeader) refreshHeaders['X-Tenant-ID'] = tenantHeader;
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
+    upstream = await fetch(`${apiBase}/api/v1/auth/refresh`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-ID': tenantId },
+      headers: refreshHeaders,
       body: JSON.stringify({ refreshToken }),
     });
   } catch {

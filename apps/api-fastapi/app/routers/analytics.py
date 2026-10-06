@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
 from app.services.proctoring_service import get_event_detail
-from app.services.teacher_scope import get_teacher_batch_ids, is_teacher_scoped
+from app.services.teacher_scope import get_teacher_batch_ids, is_teacher_scoped_user
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -48,7 +48,7 @@ async def _dashboard_scope(
 ) -> tuple[dict[str, Any], str, str, str]:
     """SQL fragments and bind params for teacher-scoped dashboard metrics."""
     params: dict[str, Any] = {"tenant_id": user.tenant_id}
-    if not is_teacher_scoped(user):
+    if not await is_teacher_scoped_user(db, user):
         return params, "", "", ""
 
     params["user_id"] = str(user.id)
