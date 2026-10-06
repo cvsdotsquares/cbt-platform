@@ -19,6 +19,7 @@ from app.core.exam_utils import (
     validate_exam_schedule,
 )
 from app.services.exam_detail import get_exam_detail
+from app.services.exam_attempts import exam_has_student_attempts
 from app.services.exam_queries import list_exams
 from app.services.candidate_context import (
     assert_exam_visible_to_candidate,
@@ -77,6 +78,7 @@ async def get_exams(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     search: str = Query(""),
+    published_only: bool = Query(False, alias="publishedOnly"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -87,6 +89,7 @@ async def get_exams(
         limit=limit,
         search=search,
         created_by_id=_teacher_filter(current_user),
+        published_only=published_only,
     )
 
 
@@ -447,11 +450,20 @@ async def sync_candidates(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    exam = await _get_exam_row(db, exam_id, current_user.tenant_id)
+    exam_row = await db.execute(
+        text(
+            """
+            SELECT id, status, start_time
+            FROM exams WHERE id = :id AND tenant_id = :tenant_id
+            """
+        ),
+        {"id": exam_id, "tenant_id": current_user.tenant_id},
+    )
+    exam = exam_row.mappings().first()
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
-    if exam["status"] != "DRAFT":
-        raise HTTPException(status_code=400, detail="Can only sync candidates on draft exams")
+    if str(exam["status"]) not in ("DRAFT", "PUBLISHED", "SCHEDULED"):
+        raise HTTPException(status_code=400, detail="Student assignments cannot be changed for this class test")
 
     desired = set(body.candidate_ids)
     batch_row = await db.execute(
@@ -485,6 +497,12 @@ async def sync_candidates(
     to_remove = current - desired
     to_add = desired - current
     now = datetime.now(timezone.utc)
+
+    if to_add and exam["start_time"] and now >= exam["start_time"]:
+        raise HTTPException(
+            status_code=400,
+            detail="This class test has started. You cannot add students after the start time.",
+        )
 
     for cid in to_remove:
         await db.execute(
@@ -543,12 +561,14 @@ async def delete_exam(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    session_count = await db.execute(
-        text("SELECT COUNT(*) FROM exam_sessions WHERE exam_id::text = :exam_id"),
-        {"exam_id": exam_id},
-    )
-    if int(session_count.scalar() or 0) > 0:
-        raise HTTPException(status_code=400, detail="Cannot delete: candidates have taken this exam")
+    if str(exam["status"] or "").upper() == "COMPLETED":
+        raise HTTPException(status_code=400, detail="This class test is completed and cannot be deleted.")
+
+    if await exam_has_student_attempts(db, exam_id):
+        raise HTTPException(
+            status_code=400,
+            detail="You can't delete this exam. A student has attempted or is attempting it.",
+        )
 
     params = {"exam_id": exam_id, "tenant_id": str(current_user.tenant_id)}
     await db.execute(text("DELETE FROM exam_questions WHERE exam_id::text = :exam_id"), params)

@@ -17,6 +17,8 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 # pypdf caps zlib/flate output at 75MB by default; large textbook PDFs can exceed that.
 PDF_DECOMPRESSION_MAX_BYTES = int(os.getenv("PDF_DECOMPRESSION_MAX_BYTES", "150_000_000"))
+# pypdf on large textbooks is very slow; PyMuPDF should be installed for indexing.
+PYPDF_FALLBACK_MAX_PAGES = int(os.getenv("MATERIAL_PYPDF_FALLBACK_MAX_PAGES", "80"))
 
 
 async def save_material_upload_file(tenant_id: str, file_name: str, upload: "UploadFile") -> tuple[str, int]:
@@ -75,22 +77,126 @@ def _pdf_decompression_limits() -> dict[str, int]:
     }
 
 
-def _extract_pdf_with_pymupdf(content: bytes) -> str | None:
+def pymupdf_available() -> bool:
     try:
-        import pymupdf
+        import pymupdf  # noqa: F401
+        return True
     except ImportError:
         try:
-            import fitz as pymupdf  # type: ignore[no-redef]
+            import fitz  # noqa: F401
+            return True
         except ImportError:
-            return None
-    doc = pymupdf.open(stream=content, filetype="pdf")
+            return False
+
+
+_TOC_HEADER = re.compile(r"\b(table of contents|contents)\b", re.I)
+_TOC_CHAPTER_LINE = re.compile(r"^(chapter\s+\d|\d{1,2}\s*[.)]\s)", re.I)
+
+
+def _span_is_bold(span: dict) -> bool:
+    flags = int(span.get("flags") or 0)
+    if flags & (1 << 4):
+        return True
+    font = (span.get("font") or "").lower()
+    return "bold" in font or "black" in font
+
+
+def _page_toc_lines(page) -> list[str]:
+    """Lines from a TOC/index page: bold headings and numbered chapter rows."""
+    lines_out: list[str] = []
     try:
-        return "\n\n".join(page.get_text("text") or "" for page in doc).strip()
+        page_dict = page.get_text("dict")
+    except Exception:
+        plain = (page.get_text("text") or "").strip()
+        return [ln.strip() for ln in plain.splitlines() if ln.strip()]
+    for block in page_dict.get("blocks") or []:
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines") or []:
+            spans = line.get("spans") or []
+            if not spans:
+                continue
+            line_text = "".join(str(s.get("text") or "") for s in spans).strip()
+            if not line_text or len(line_text) < 2:
+                continue
+            bold_len = sum(len(str(s.get("text") or "")) for s in spans if _span_is_bold(s))
+            if bold_len >= max(3, len(line_text) * 0.35) or _TOC_CHAPTER_LINE.match(line_text):
+                lines_out.append(line_text)
+    return lines_out
+
+
+def extract_pdf_for_material_index(
+    content: bytes,
+    *,
+    body_max_pages: int = 36,
+    toc_scan_pages: int = 25,
+    toc_pages_after_header: int = 8,
+) -> tuple[str, str]:
+    """
+    One pass over the PDF: body text for search chunks + TOC/index text for chapter list.
+    TOC uses bold lines (and numbered rows) from contents pages only.
+    """
+    if not pymupdf_available():
+        return "", ""
+    doc = _open_pymupdf(content)
+    try:
+        total = doc.page_count
+        body_end = min(total, max(body_max_pages, 0)) if body_max_pages else total
+        body_parts = [(doc[i].get_text("text") or "") for i in range(body_end)]
+
+        scan_end = min(total, max(toc_scan_pages, 1))
+        toc_start = 0
+        for i in range(scan_end):
+            plain = doc[i].get_text("text") or ""
+            if _TOC_HEADER.search(plain):
+                toc_start = i
+                break
+
+        toc_end = min(total, toc_start + max(toc_pages_after_header, 1))
+        toc_lines: list[str] = []
+        for i in range(toc_start, toc_end):
+            toc_lines.extend(_page_toc_lines(doc[i]))
+
+        toc_text = "\n".join(toc_lines).strip()
+        if len(toc_text) < 80:
+            toc_text = "\n\n".join(
+                (doc[i].get_text("text") or "") for i in range(toc_start, toc_end)
+            ).strip()
+
+        return "\n\n".join(body_parts).strip(), toc_text
     finally:
         doc.close()
 
 
-def _extract_pdf_with_pypdf(content: bytes) -> str:
+def _open_pymupdf(content: bytes):
+    try:
+        import pymupdf
+    except ImportError:
+        import fitz as pymupdf  # type: ignore[no-redef]
+    return pymupdf.open(stream=content, filetype="pdf")
+
+
+def _extract_pdf_with_pymupdf(content: bytes, *, max_pages: int | None = None) -> str | None:
+    if not pymupdf_available():
+        return None
+    doc = _open_pymupdf(content)
+    try:
+        page_count = doc.page_count
+        if max_pages is not None and max_pages > 0:
+            page_count = min(page_count, max_pages)
+        if page_count <= 0:
+            return ""
+        parts: list[str] = []
+        for i in range(page_count):
+            parts.append(doc[i].get_text("text") or "")
+            if i > 0 and i % 25 == 0:
+                logger.info("PDF extract progress: %s/%s pages", i + 1, page_count)
+        return "\n\n".join(parts).strip()
+    finally:
+        doc.close()
+
+
+def _extract_pdf_with_pypdf(content: bytes, *, max_pages: int | None = None) -> str:
     logging.getLogger("pypdf").setLevel(logging.ERROR)
     from pypdf import PdfReader, apply_configuration
     from pypdf.errors import LimitReachedError
@@ -98,7 +204,11 @@ def _extract_pdf_with_pypdf(content: bytes) -> str:
     page_texts: list[str] = []
     with apply_configuration(**_pdf_decompression_limits()):
         reader = PdfReader(BytesIO(content))
-        for index, page in enumerate(reader.pages):
+        limit = len(reader.pages)
+        if max_pages is not None and max_pages > 0:
+            limit = min(limit, max_pages)
+        for index in range(limit):
+            page = reader.pages[index]
             try:
                 page_texts.append(page.extract_text() or "")
             except LimitReachedError as exc:
@@ -116,24 +226,77 @@ def _extract_pdf_with_pypdf(content: bytes) -> str:
     return "\n\n".join(page_texts).strip()
 
 
-def extract_material_text(file_url: str, mime_type: str, file_name: str) -> str:
+def extract_material_text(
+    file_url: str,
+    mime_type: str,
+    file_name: str,
+    *,
+    max_pages: int | None = None,
+) -> str:
     content = read_material_file(file_url)
     is_pdf = mime_type == "application/pdf" or file_name.lower().endswith(".pdf")
     if is_pdf:
-        extracted = _extract_pdf_with_pymupdf(content)
+        extracted = _extract_pdf_with_pymupdf(content, max_pages=max_pages)
         if extracted is None:
-            logger.info("PyMuPDF not installed; using pypdf for %s", file_name)
-            return _extract_pdf_with_pypdf(content)
+            logger.warning(
+                "PyMuPDF not installed; pypdf fallback is slow on large PDFs (%s). "
+                "Install pymupdf for fast indexing.",
+                file_name,
+            )
+            pypdf_cap = max_pages if max_pages and max_pages > 0 else PYPDF_FALLBACK_MAX_PAGES
+            return _extract_pdf_with_pypdf(content, max_pages=pypdf_cap)
         if len(extracted) >= 200:
             return extracted
-        logger.info("PyMuPDF returned little text for %s; trying pypdf", file_name)
-        fallback = _extract_pdf_with_pypdf(content)
+        logger.info(
+            "PyMuPDF returned little text for %s; trying pypdf (max %s pages)",
+            file_name,
+            PYPDF_FALLBACK_MAX_PAGES,
+        )
+        pypdf_cap = max_pages if max_pages and max_pages > 0 else PYPDF_FALLBACK_MAX_PAGES
+        fallback = _extract_pdf_with_pypdf(content, max_pages=pypdf_cap)
         return fallback if len(fallback) > len(extracted) else extracted
     return content.decode("utf-8", errors="replace").strip()
 
 
+def extract_material_text_for_indexing(
+    file_url: str,
+    mime_type: str,
+    file_name: str,
+    *,
+    body_max_pages: int | None = 36,
+) -> tuple[str, str]:
+    """
+    Returns (body_text_for_chunks, syllabus_text_for_chapter_detection).
+    PDFs: syllabus text prefers bold/index (contents) pages; body uses limited page count.
+    """
+    content = read_material_file(file_url)
+    is_pdf = mime_type == "application/pdf" or file_name.lower().endswith(".pdf")
+    if is_pdf and pymupdf_available():
+        cap = body_max_pages if body_max_pages and body_max_pages > 0 else 36
+        body, toc = extract_pdf_for_material_index(content, body_max_pages=cap)
+        if body or toc:
+            logger.info(
+                "PDF index extract: file=%s body_chars=%s toc_chars=%s (bold/index pages)",
+                file_name,
+                len(body),
+                len(toc),
+            )
+            return body, toc or body[:12_000]
+    body = extract_material_text(
+        file_url,
+        mime_type,
+        file_name,
+        max_pages=body_max_pages,
+    )
+    return body, body[:12_000]
+
+
 def chunk_material_text(text: str, chunk_size: int = 2400, overlap: int = 300) -> list[str]:
-    cleaned = re.sub(r"\s+", " ", text).strip()
+    # Collapsing whitespace on multi‑MB textbook strings is slow; chunk raw text when large.
+    if len(text) > 800_000:
+        cleaned = text.replace("\f", "\n").replace("\r\n", "\n").strip()
+    else:
+        cleaned = re.sub(r"\s+", " ", text).strip()
     if not cleaned:
         return []
     chunks: list[str] = []

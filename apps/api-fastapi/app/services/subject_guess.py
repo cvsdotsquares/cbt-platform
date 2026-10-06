@@ -51,3 +51,40 @@ def guess_subject_id(
                     return subject.id
 
     return fallback_subject_id
+
+
+def resolve_upload_subject_id(
+    file_name: str,
+    title: str,
+    subjects: list["Subject"],
+    form_subject_id: str | None,
+) -> str | None:
+    """
+    Pick subject for an upload. Filename/title hints override a wrong form selection
+    (e.g. English Class 12.pdf uploaded while IT was selected in the dropdown).
+    """
+    if not subjects:
+        return form_subject_id
+
+    haystack = f"{file_name} {title}".lower()
+
+    if re.search(r"\benglish\b", haystack, re.I):
+        for subject in subjects:
+            name = subject.name.lower()
+            code = (subject.code or "").lower()
+            if "english" in name or code in ("eng", "english"):
+                return subject.id
+
+    if re.search(r"\binformation\s+technology\b|\bit\b", haystack, re.I) and not re.search(
+        r"\benglish\b", haystack, re.I
+    ):
+        for subject in subjects:
+            name = subject.name.lower()
+            code = (subject.code or "").lower()
+            if "information" in name and "technology" in name or code in ("it", "ict"):
+                return subject.id
+
+    guessed = guess_subject_id(file_name, title, subjects, fallback_subject_id=None)
+    if guessed:
+        return guessed
+    return form_subject_id

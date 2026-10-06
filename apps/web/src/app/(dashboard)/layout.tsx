@@ -1,8 +1,9 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { useAuthStore } from '@/stores/auth-store';
-import { isAdmin, normalizeRoles } from '@/lib/roles';
+import { isAdmin, isTeacherOnly, normalizeRoles } from '@/lib/roles';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
 import { useRouter, usePathname } from 'next/navigation';
@@ -10,6 +11,7 @@ import { useEffect } from 'react';
 import { usePermissions } from '@/hooks/use-permissions';
 import { getDefaultDashboardPath, getPermissionForPath } from '@/lib/dashboard-nav';
 import { useClearNavNotificationsOnVisit } from '@/hooks/use-clear-nav-notifications-on-visit';
+import { getQueryClient } from '@/lib/query-client';
 
 const AiAssistant = dynamic(
   () => import('@/components/ai/ai-assistant').then((mod) => mod.AiAssistant),
@@ -17,6 +19,14 @@ const AiAssistant = dynamic(
 );
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={getQueryClient()}>
+      <DashboardLayoutShell>{children}</DashboardLayoutShell>
+    </QueryClientProvider>
+  );
+}
+
+function DashboardLayoutShell({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, user, _hasHydrated } = useAuthStore();
   const router = useRouter();
   const pathname = usePathname();
@@ -36,6 +46,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
     if (!staffUser) {
       router.replace('/my-exams');
+      return;
+    }
+
+    if (isTeacherOnly(roles) && pathname === '/dashboard') {
+      router.replace('/dashboard/teacher');
       return;
     }
 

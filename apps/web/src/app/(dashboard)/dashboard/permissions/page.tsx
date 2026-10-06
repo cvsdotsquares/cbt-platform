@@ -61,7 +61,7 @@ function viewCodeFor(modules: ModuleRow[], code: string) {
 
 const ROLE_SUBTITLE: Record<string, string> = {
   TEACHER: 'Class teacher',
-  INSTITUTE_ADMIN: 'Institute staff',
+  // INSTITUTE_ADMIN: 'Institute staff',
 };
 
 function initialsOf(label: string) {
@@ -89,12 +89,14 @@ export default function RolePermissionsPage() {
   }, [ready, user, isSuperAdmin, router]);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['role-permissions'],
+    queryKey: ['role-permissions', 'teacher-only'],
     queryFn: () => rolePermissionsApi.matrix(accessToken!),
     enabled: ready && !!accessToken && isSuperAdmin,
   });
 
-  const selectedRole = data?.roles.some((role) => role.name === requestedRole)
+  const configurableRoles = data?.roles ?? [{ name: 'TEACHER', label: 'Teacher', description: '' }];
+
+  const selectedRole = configurableRoles.some((role) => role.name === requestedRole)
     ? requestedRole
     : 'TEACHER';
   const saved = data?.granted[selectedRole] ?? [];
@@ -114,6 +116,14 @@ export default function RolePermissionsPage() {
     const query = params.toString();
     router.replace(query ? `/dashboard/permissions?${query}` : '/dashboard/permissions');
   }, [router, searchParams]);
+
+  useEffect(() => {
+    if (requestedRole === 'INSTITUTE_ADMIN') {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set('role', 'teacher');
+      router.replace(`/dashboard/permissions?${params.toString()}`);
+    }
+  }, [requestedRole, router, searchParams]);
 
   const saveMutation = useMutation({
     mutationFn: (permissions: string[]) => rolePermissionsApi.save(accessToken!, selectedRole, permissions),
@@ -137,7 +147,7 @@ export default function RolePermissionsPage() {
     onError: (e: Error) => toast({ title: 'Could not reset permissions', description: e.message, variant: 'destructive' }),
   });
 
-  const roleMeta = data?.roles.find((role) => role.name === selectedRole);
+  const roleMeta = configurableRoles.find((role) => role.name === selectedRole);
   const needle = query.trim().toLowerCase();
 
   const grouped = useMemo(() => {
@@ -200,24 +210,26 @@ export default function RolePermissionsPage() {
         </div>
       </PageHeader>
 
-      <section className="rounded-2xl border bg-card px-5 py-5 shadow-sm">
-        <h2 className="text-base font-semibold">Select role</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Pick who you are configuring — permissions apply to every user with that role
-        </p>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          {(data?.roles ?? [{ name: 'TEACHER', label: 'Teacher', description: '' }]).map((role) => (
-            <PickCard
-              key={role.name}
-              title={role.label}
-              subtitle={ROLE_SUBTITLE[role.name] || role.description}
-              initials={initialsOf(role.label)}
-              selected={role.name === selectedRole}
-              onClick={() => selectRole(role.name)}
-            />
-          ))}
-        </div>
-      </section>
+      {configurableRoles.length > 1 ? (
+        <section className="rounded-2xl border bg-card px-5 py-5 shadow-sm">
+          <h2 className="text-base font-semibold">Select role</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Pick who you are configuring — permissions apply to every user with that role
+          </p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {configurableRoles.map((role) => (
+              <PickCard
+                key={role.name}
+                title={role.label}
+                subtitle={ROLE_SUBTITLE[role.name] || role.description}
+                initials={initialsOf(role.label)}
+                selected={role.name === selectedRole}
+                onClick={() => selectRole(role.name)}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="rounded-2xl border bg-card px-5 py-4 shadow-sm">
         <h2 className="text-sm font-semibold">What each permission means</h2>

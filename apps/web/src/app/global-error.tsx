@@ -1,5 +1,7 @@
 'use client';
 
+import { getDisplayErrorMessage } from '@/lib/format-error-message';
+
 export default function GlobalError({
   error,
   reset,
@@ -7,11 +9,13 @@ export default function GlobalError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const message = getDisplayErrorMessage(error, 'A critical error occurred. Please reload the page.');
+
   return (
     <html lang="en">
       <body className="flex min-h-screen flex-col items-center justify-center gap-4 p-8 font-sans text-center">
         <h1 className="text-2xl font-bold">NCERT Institute</h1>
-        <p className="text-muted-foreground">A critical error occurred. Please reload the page.</p>
+        <p className="max-w-md text-muted-foreground">{message}</p>
         <button
           type="button"
           onClick={() => reset()}
@@ -19,10 +23,8 @@ export default function GlobalError({
         >
           Try again
         </button>
-        {process.env.NODE_ENV !== 'production' && (
-          <pre className="mt-4 max-w-lg overflow-auto rounded bg-gray-100 p-4 text-left text-xs">
-            {error.message}
-          </pre>
+        {error.digest && (
+          <p className="text-xs text-gray-500">Reference: {error.digest}</p>
         )}
       </body>
     </html>

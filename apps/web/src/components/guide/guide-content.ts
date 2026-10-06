@@ -388,8 +388,12 @@ export const CANDIDATE_GUIDE: RoleGuide = {
   ],
 };
 
+/** When false, the in-app help center uses the teacher guide instead of Institute Admin. */
+export const INSTITUTE_ADMIN_GUIDE_ENABLED = false;
+
 export function getGuideForRole(role: GuideRole): RoleGuide {
   if (role === 'teacher') return TEACHER_GUIDE;
   if (role === 'candidate') return CANDIDATE_GUIDE;
+  if (!INSTITUTE_ADMIN_GUIDE_ENABLED) return TEACHER_GUIDE;
   return ADMIN_GUIDE;
 }

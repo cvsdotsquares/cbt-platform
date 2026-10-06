@@ -1,4 +1,6 @@
 export * from './constants/enums';
+export * from './features/tenant-branding';
+export * from './features/syllabus-mark-progress';
 export * from './rbac/roles';
 export * from './rbac/permissions';
 export * from './types/api';

@@ -11,7 +11,8 @@ import { useAuthStore } from '@/stores/auth-store';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { tenantsApi } from '@/lib/api';
 import { applyTenantPrimaryColor } from '@/lib/tenant-branding';
-import { Permission } from '@cbt/shared';
+import { Permission, TENANT_BRANDING_ENABLED, TENANT_BRANDING_COLOR_PRESETS } from '@cbt/shared';
+import { cn } from '@/lib/utils';
 import { usePermissions } from '@/hooks/use-permissions';
 import { PageHeader } from '@/components/layout/page-header';
 import { toast } from '@/hooks/use-toast';
@@ -19,15 +20,6 @@ import {
   Settings, User, Palette, Building2, Mail, Shield, Check,
   Loader2, Sparkles,
 } from 'lucide-react';
-
-const COLOR_PRESETS = [
-  { label: 'Royal Blue', value: '#2563eb' },
-  { label: 'Violet', value: '#7c3aed' },
-  { label: 'Emerald', value: '#059669' },
-  { label: 'Rose', value: '#e11d48' },
-  { label: 'Amber', value: '#d97706' },
-  { label: 'Slate', value: '#475569' },
-];
 
 type TenantData = {
   name?: string;
@@ -66,7 +58,7 @@ export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [primaryColor, setPrimaryColor] = useState('#2563eb');
 
-  const canManageBranding = can(Permission.TENANT_BRANDING);
+  const canManageBranding = TENANT_BRANDING_ENABLED && can(Permission.TENANT_BRANDING);
 
   const { data: tenant, isLoading: tenantLoading } = useQuery({
     queryKey: ['tenant', user?.tenantId],
@@ -171,7 +163,7 @@ export default function SettingsPage() {
 
       <div className="grid gap-6 lg:grid-cols-5">
         {/* Account details */}
-        <Card className="surface-card lg:col-span-2">
+        <Card className={cn('surface-card', canManageBranding ? 'lg:col-span-2' : 'lg:col-span-5')}>
           <CardHeader className="border-b border-border/60 pb-4">
             <CardTitle className="flex items-center gap-2.5 text-base font-bold">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
@@ -188,7 +180,7 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Branding */}
+        {canManageBranding && (
         <Card className="surface-card border-primary/20 lg:col-span-3">
           <CardHeader className="border-b border-border/60 pb-4">
             <CardTitle className="flex items-center gap-2.5 text-base font-bold">
@@ -208,7 +200,7 @@ export default function SettingsPage() {
                 <div className="space-y-3">
                   <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Color Presets</Label>
                   <div className="flex flex-wrap gap-2.5">
-                    {COLOR_PRESETS.map((preset) => (
+                    {TENANT_BRANDING_COLOR_PRESETS.map((preset) => (
                       <button
                         key={preset.value}
                         type="button"
@@ -294,6 +286,7 @@ export default function SettingsPage() {
             )}
           </CardContent>
         </Card>
+        )}
       </div>
     </div>
   );

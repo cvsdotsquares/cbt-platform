@@ -11,7 +11,7 @@ import { TableSkeleton } from '@/components/ui/skeleton';
 import { batchesApi, examsApi, learningApi, type ExamListItem } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { usePermissions } from '@/hooks/use-permissions';
-import { Permission } from '@cbt/shared';
+import { Permission, SYLLABUS_MARK_PROGRESS_ENABLED } from '@cbt/shared';
 import { useAuthStore } from '@/stores/auth-store';
 import { formatExamDateTime } from '@/lib/exam-dates';
 import { cn } from '@/lib/utils';
@@ -117,7 +117,7 @@ export default function TeacherPage() {
   const { user } = useAuthStore();
   const { can } = usePermissions();
   const greeting = getGreeting();
-  const actions = can(Permission.MATERIAL_UPLOAD)
+  const actions = (can(Permission.MATERIAL_UPLOAD)
     ? [
         {
           label: 'NCERT Books',
@@ -128,7 +128,10 @@ export default function TeacherPage() {
         },
         ...quickActions,
       ]
-    : quickActions;
+    : quickActions
+  ).filter(
+    (action) => SYLLABUS_MARK_PROGRESS_ENABLED || action.href !== '/dashboard/batches',
+  );
 
   const { data: batches, isLoading: batchesLoading } = useQuery({
     queryKey: ['batches'],
@@ -311,12 +314,14 @@ export default function TeacherPage() {
                 Create Class Test
               </Link>
             </Button>
-            <Button size="sm" variant="outline" asChild>
-              <Link href="/dashboard/batches">
-                <School className="mr-2 h-4 w-4" />
-                Topic Progress
-              </Link>
-            </Button>
+            {SYLLABUS_MARK_PROGRESS_ENABLED && (
+              <Button size="sm" variant="outline" asChild>
+                <Link href="/dashboard/batches">
+                  <School className="mr-2 h-4 w-4" />
+                  Topic Progress
+                </Link>
+              </Button>
+            )}
           </div>
         </div>
       </section>
@@ -349,11 +354,13 @@ export default function TeacherPage() {
                 Batches and subjects linked to your teacher account ({assignedBatches.length} total).
               </p>
             </div>
-            <Button size="sm" variant="outline" asChild>
-              <Link href="/dashboard/batches">
-                Topic progress <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-              </Link>
-            </Button>
+            {SYLLABUS_MARK_PROGRESS_ENABLED && (
+              <Button size="sm" variant="outline" asChild>
+                <Link href="/dashboard/batches">
+                  Topic progress <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                </Link>
+              </Button>
+            )}
           </div>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {assignedBatches.map((batch) => {

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import loaded_role_names
 
 ELEVATED_ROLES = frozenset(
-    {"SUPER_ADMIN", "ORG_ADMIN", "INSTITUTE_ADMIN", "EXAM_MANAGER", "ADMIN"}
+    {"SUPER_ADMIN", "ORG_ADMIN", "EXAM_MANAGER", "ADMIN"}
 )
 
 

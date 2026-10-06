@@ -12,6 +12,7 @@ import { PageHeader } from '@/components/layout/page-header';
 import { aiApi, curriculumApi, batchesApi, materialsApi } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { toast } from '@/hooks/use-toast';
+import { displayChapterTitle } from '@/lib/chapter-title';
 import { AiTestQuestionsReview } from '@/components/admin/ai-test-questions-review';
 import { cn } from '@/lib/utils';
 import {
@@ -20,6 +21,16 @@ import {
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
+import { sessionsMatch } from '@/lib/academic-session';
+import {
+  batchMatchesSelectedClass,
+  batchSectionKey,
+  compareBatchesForList,
+  formatAcademicClassLabel,
+  formatBatchListTitle,
+} from '@/lib/academic-class';
+
+const UPLOAD_MATERIAL_STATUSES = new Set(['READY', 'INDEXING', 'PENDING']);
 
 type TestMode = 'single' | 'all';
 
@@ -89,6 +100,7 @@ export default function AiTestsPage() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadTitle, setUploadTitle] = useState('');
   const [form, setForm] = useState({ ...INITIAL_CREATE_FORM });
+  const [pickerClassId, setPickerClassId] = useState('');
 
   useEffect(() => {
     if (teacherPortal) setMode('single');
@@ -107,18 +119,81 @@ export default function AiTestsPage() {
     queryKey: ['batches'],
     queryFn: () => batchesApi.list(accessToken!) as Promise<{
       id: string; name: string;
-      academicClass: { name: string; level: number };
+      academicYear?: string;
+      academicClass: { id: string; name: string; level: number };
       _count?: { enrollments: number };
       teacherAssignments?: { subject: { id: string; name: string; code?: string } }[];
     }[]>,
     enabled: !!accessToken,
   });
 
+  const sortedBatches = useMemo(
+    () => [...(batches ?? [])].sort(compareBatchesForList),
+    [batches],
+  );
+
+  const classTabsForPicker = useMemo(() => {
+    const levelsWithBatches = new Set(sortedBatches.map((b) => b.academicClass.level));
+    const fromCurriculum = [...(classes ?? [])]
+      .filter((c) => levelsWithBatches.has(c.level))
+      .sort((a, b) => a.level - b.level);
+    if (fromCurriculum.length) return fromCurriculum;
+    const seen = new Set<number>();
+    return sortedBatches
+      .filter((b) => {
+        if (seen.has(b.academicClass.level)) return false;
+        seen.add(b.academicClass.level);
+        return true;
+      })
+      .map((b) => ({
+        id: b.academicClass.id,
+        level: b.academicClass.level,
+        name: b.academicClass.name,
+      }))
+      .sort((a, b) => a.level - b.level);
+  }, [classes, sortedBatches]);
+
+  const pickerClassMeta = classTabsForPicker.find((c) => c.id === pickerClassId);
+
+  const batchesForPickerClass = useMemo(() => {
+    if (!pickerClassMeta) return [];
+    return sortedBatches.filter((b) =>
+      batchMatchesSelectedClass(b, pickerClassId, pickerClassMeta.level),
+    );
+  }, [sortedBatches, pickerClassId, pickerClassMeta]);
+
+  const sectionOptionsForPicker = useMemo(() => {
+    const keyCounts = new Map<string, number>();
+    for (const b of batchesForPickerClass) {
+      const key = batchSectionKey(b);
+      keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
+    }
+    return batchesForPickerClass.map((batch) => {
+      const section = batchSectionKey(batch);
+      const duplicate = (keyCounts.get(section) ?? 0) > 1;
+      return {
+        batch,
+        label: duplicate && batch.academicYear
+          ? `${section} · ${batch.academicYear}`
+          : section,
+      };
+    });
+  }, [batchesForPickerClass]);
+
   const subjects = (classes ?? []).flatMap((c) =>
     c.subjects.map((s) => ({ ...s, classLevel: c.level })),
   );
 
-  const selectedBatch = (batches ?? []).find((b) => b.id === form.batchId);
+  const selectedBatch = sortedBatches.find((b) => b.id === form.batchId);
+
+  useEffect(() => {
+    if (!form.batchId || !selectedBatch) return;
+    const cls = classTabsForPicker.find(
+      (c) => c.level === selectedBatch.academicClass.level
+        || c.id === selectedBatch.academicClass.id,
+    );
+    if (cls && pickerClassId !== cls.id) setPickerClassId(cls.id);
+  }, [form.batchId, selectedBatch, classTabsForPicker, pickerClassId]);
   const uploadClass = selectedBatch
     ? (classes ?? []).find((c) => c.level === selectedBatch.academicClass.level)
     : undefined;
@@ -160,15 +235,19 @@ export default function AiTestsPage() {
       subjectId?: string | null;
       subject?: { id: string; name: string } | null;
       academicClass?: { level: number } | null;
+      academicSession?: string | null;
     }[]>,
     enabled: !!accessToken && !!selectedBatch,
   });
 
+  const batchAcademicYear = selectedBatch?.academicYear ?? '';
+
   const subjectHasUploadedBook = (subjectId: string, classLevel: number) =>
     (indexedMaterials ?? []).some(
       (m) =>
-        m.status === 'READY'
+        UPLOAD_MATERIAL_STATUSES.has(m.status)
         && m.academicClass?.level === classLevel
+        && sessionsMatch(m.academicSession, batchAcademicYear)
         && (m.subjectId === subjectId || m.subject?.id === subjectId),
     );
 
@@ -334,7 +413,7 @@ export default function AiTestsPage() {
       queryClient.invalidateQueries({ queryKey: ['exams'] });
       queryClient.invalidateQueries({ queryKey: ['teacher-dashboard'] });
       if (!examId) {
-        toast({ title: 'Draft exam created', description: d.message, variant: 'destructive' });
+        toast({ title: 'Draft exam created.', description: d.message, variant: 'destructive' });
         return;
       }
       setCreatedExam({
@@ -343,7 +422,7 @@ export default function AiTestsPage() {
         questionCount: d.questionCount ?? 0,
       });
       toast({
-        title: 'Draft exam created',
+        title: d.source === 'dummy' ? 'Draft created (fallback content).' : 'Draft exam created',
         description: d.message ?? 'Review AI-generated questions below, then publish from Class Tests.',
         variant: 'success',
       });
@@ -370,12 +449,16 @@ export default function AiTestsPage() {
     && !!selectedBatch
     && !subjectHasUploadedBook(form.subjectId, selectedBatch.academicClass.level);
 
+  /** Syllabus can list Done chapters even when the book gate fails; do not hide the picker in that case. */
+  const blockChapterPickerForMissingBook =
+    selectedSubjectMissingBook && selectableChapters.length === 0;
+
   const canCreate =
     !!form.title.trim()
     && form.batchId
     && form.questionTypes.length > 0
     && (mode === 'all' || !!form.subjectId)
-    && (!singleSubjectMode || (form.chapterIds.length > 0 && !selectedSubjectMissingBook))
+    && (!singleSubjectMode || (form.chapterIds.length > 0 && !blockChapterPickerForMissingBook))
     && (mode !== 'all' || subjectsMissingBooks.length === 0)
     && !createdExam;
   const activeStep = createdExam ? 3 : createMutation.isPending ? 2 : 1;
@@ -512,24 +595,60 @@ export default function AiTestsPage() {
                   </p>
                 </div>
 
-                <div>
-                  <Label htmlFor="batch">Class / Batch</Label>
-                  <select
-                    id="batch"
-                    className={selectClass}
-                    value={form.batchId}
-                    onChange={(e) => setForm({ ...form, batchId: e.target.value, subjectId: '', chapterIds: [] })}
-                  >
-                    <option value="">Choose batch</option>
-                    {(batches ?? []).map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.academicClass.name} — {b.name}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <Label htmlFor="picker-class">Class</Label>
+                    <select
+                      id="picker-class"
+                      className={selectClass}
+                      value={pickerClassId}
+                      disabled={classTabsForPicker.length === 0}
+                      onChange={(e) => {
+                        setPickerClassId(e.target.value);
+                        setForm({ ...form, batchId: '', subjectId: '', chapterIds: [] });
+                      }}
+                    >
+                      <option value="">
+                        {classTabsForPicker.length === 0 ? 'No classes available' : 'Select class'}
                       </option>
-                    ))}
-                  </select>
-                  {teacherPortal && !(batches ?? []).length && (
-                    <p className="mt-1.5 text-xs text-muted-foreground">
-                      No assigned classes yet. Ask your admin to assign you to a batch and subject.
+                      {classTabsForPicker.map((cls) => (
+                        <option key={cls.id} value={cls.id}>
+                          {formatAcademicClassLabel(cls.level, cls.name)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <Label htmlFor="picker-section">Section</Label>
+                    <select
+                      id="picker-section"
+                      className={selectClass}
+                      value={form.batchId}
+                      disabled={!pickerClassId || sectionOptionsForPicker.length === 0}
+                      onChange={(e) => setForm({
+                        ...form,
+                        batchId: e.target.value,
+                        subjectId: '',
+                        chapterIds: [],
+                      })}
+                    >
+                      <option value="">
+                        {!pickerClassId
+                          ? 'Select class first'
+                          : sectionOptionsForPicker.length === 0
+                            ? 'No sections for this class'
+                            : 'Select section'}
+                      </option>
+                      {sectionOptionsForPicker.map(({ batch, label }) => (
+                        <option key={batch.id} value={batch.id}>{label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {classTabsForPicker.length === 0 && (
+                    <p className="sm:col-span-2 text-xs text-muted-foreground">
+                      {teacherPortal
+                        ? 'No assigned classes yet. Ask your admin to assign you to a batch and subject.'
+                        : 'No classes with batches yet. Add batches under Classes & Batches first.'}
                     </p>
                   )}
                 </div>
@@ -615,7 +734,7 @@ export default function AiTestsPage() {
                             <Loader2 className="h-4 w-4 animate-spin" />
                             Loading chapters…
                           </div>
-                        ) : selectedSubjectMissingBook ? (
+                        ) : blockChapterPickerForMissingBook ? (
                           <div className="px-4 py-8 text-center">
                             <p className="text-sm font-medium text-destructive">
                               This book is not uploaded — first upload a book on Books &amp; Notes.
@@ -651,6 +770,16 @@ export default function AiTestsPage() {
                             )}
                           </div>
                         ) : (
+                          <>
+                            {selectedSubjectMissingBook && (
+                              <p className="border-b border-border/50 bg-destructive/5 px-4 py-2.5 text-xs text-destructive">
+                                No indexed book matched this batch session — upload on{' '}
+                                <Link href="/dashboard/materials" className="font-medium underline-offset-2 hover:underline">
+                                  Books &amp; Notes
+                                </Link>
+                                {' '}before generating, or re-index if upload is still in progress.
+                              </p>
+                            )}
                           <ul className="divide-y divide-border/50">
                             {selectableChapters.map((ch) => {
                               const checked = form.chapterIds.includes(ch.id);
@@ -680,7 +809,7 @@ export default function AiTestsPage() {
                                     </span>
                                     <span className="min-w-0 flex-1">
                                       <span className={cn('block truncate text-sm font-medium', checked ? 'text-foreground' : 'text-foreground/90')}>
-                                        {ch.title}
+                                        {displayChapterTitle(ch.title)}
                                       </span>
                                       <span className="mt-0.5 block text-[11px] text-muted-foreground">
                                         Chapter {ch.number}
@@ -696,6 +825,7 @@ export default function AiTestsPage() {
                               );
                             })}
                           </ul>
+                          </>
                         )}
                       </div>
                       {chapterScroll.canDown && (
@@ -920,8 +1050,8 @@ export default function AiTestsPage() {
               />
               <SummaryRow
                 icon={GraduationCap}
-                label="Batch"
-                value={selectedBatch ? `${selectedBatch.academicClass.name} · ${selectedBatch.name}` : 'Not selected'}
+                label="Class & section"
+                value={selectedBatch ? formatBatchListTitle(selectedBatch) : 'Not selected'}
               />
 
               {mode === 'all' && classSubjects.length > 0 && (
@@ -960,9 +1090,14 @@ export default function AiTestsPage() {
                 <div>
                   <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Subject</p>
                   <Badge variant="secondary">{selectedSubject.name}</Badge>
-                  {selectedSubjectMissingBook && (
+                  {blockChapterPickerForMissingBook && (
                     <p className="mt-2 text-xs text-destructive">
                       This book is not uploaded — first upload a book on Books &amp; Notes.
+                    </p>
+                  )}
+                  {selectedSubjectMissingBook && selectableChapters.length > 0 && (
+                    <p className="mt-2 text-xs text-amber-600 dark:text-amber-500">
+                      Done chapters are listed, but no indexed book matched this batch — confirm upload on Books &amp; Notes before generating.
                     </p>
                   )}
                 </div>
@@ -990,7 +1125,7 @@ export default function AiTestsPage() {
                   Checklist
                 </p>
                 <ul className="space-y-2">
-                  <ChecklistItem done={!!form.batchId} label="Batch selected" />
+                  <ChecklistItem done={!!form.batchId} label="Section selected" />
                   <ChecklistItem done={mode === 'all' || !!form.subjectId} label="Subject configured" />
                   <ChecklistItem
                     done={!singleSubjectMode || form.chapterIds.length > 0}

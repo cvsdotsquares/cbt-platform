@@ -111,32 +111,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     Permission.MATERIAL_READ, Permission.LEARNING_READ,
   ],
 
-  [Role.INSTITUTE_ADMIN]: [
-    Permission.USER_CREATE, Permission.USER_READ, Permission.USER_UPDATE,
-    Permission.USER_DELETE, Permission.USER_ASSIGN_ROLE, Permission.SESSION_MANAGE,
-    Permission.MFA_MANAGE,
-    Permission.TENANT_READ, Permission.TENANT_UPDATE, Permission.TENANT_BRANDING,
-    Permission.TENANT_SECURITY_CONFIG,
-    Permission.CANDIDATE_CREATE, Permission.CANDIDATE_INVITE, Permission.CANDIDATE_READ, Permission.CANDIDATE_UPDATE,
-    Permission.CANDIDATE_DELETE, Permission.CANDIDATE_BULK_IMPORT,
-    Permission.QUESTION_CREATE, Permission.QUESTION_READ, Permission.QUESTION_UPDATE,
-    Permission.QUESTION_DELETE, Permission.QUESTION_APPROVE, Permission.QUESTION_IMPORT,
-    Permission.QUESTION_EXPORT, Permission.QUESTION_VERSION,
-    Permission.EXAM_CREATE, Permission.EXAM_READ, Permission.EXAM_UPDATE,
-    Permission.EXAM_DELETE, Permission.EXAM_PUBLISH, Permission.EXAM_SCHEDULE,
-    Permission.EXAM_ASSIGN_CANDIDATES, Permission.EXAM_TEMPLATE, Permission.EXAM_VIEW_RESPONSE,
-    Permission.RESULT_EVALUATE, Permission.RESULT_PUBLISH, Permission.RESULT_READ,
-    Permission.RESULT_RANK, Permission.RESULT_CUTOFF, Permission.RESULT_CERTIFICATE,
-    Permission.PROCTORING_MONITOR, Permission.SECURITY_VIEW_VIOLATIONS,
-    Permission.ANALYTICS_VIEW, Permission.ANALYTICS_EXPORT,
-    Permission.AUDIT_READ,
-    Permission.CURRICULUM_MANAGE, Permission.CURRICULUM_READ,
-    Permission.BATCH_MANAGE, Permission.BATCH_READ,
-    Permission.SYLLABUS_MANAGE, Permission.SYLLABUS_READ,
-    Permission.MATERIAL_UPLOAD, Permission.MATERIAL_READ, Permission.MATERIAL_DELETE,
-    Permission.AI_GENERATE_TEST,
-    Permission.LEARNING_READ, Permission.LEARNING_MANAGE,
-  ],
+  /** Placeholder — Institute Admin mirrors Teacher until re-enabled (see assignment below). */
+  [Role.INSTITUTE_ADMIN]: [],
 
   /** Teaching portal — assigned subjects, progress, students, class tests, results. */
   [Role.TEACHER]: [
@@ -168,6 +144,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     Permission.AI_GENERATE_TEST,
   ],
 };
+
+ROLE_PERMISSIONS[Role.INSTITUTE_ADMIN] = [...ROLE_PERMISSIONS[Role.TEACHER]];
 
 export function hasPermission(roles: Role[], permission: Permission): boolean {
   return roles.some((role) => ROLE_PERMISSIONS[role]?.includes(permission));

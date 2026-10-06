@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -14,20 +14,46 @@ import { EmptyState } from '@/components/layout/data-table';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
-import { batchesApi, curriculumApi, candidatesApi, usersApi } from '@/lib/api';
+import { batchesApi, curriculumApi, candidatesApi, usersApi, materialsApi } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { usePermissions } from '@/hooks/use-permissions';
 import { Permission } from '@cbt/shared';
+import { sessionsMatch } from '@/lib/academic-session';
+import { batchSectionKey, compareBatchesForList, formatBatchListTitle } from '@/lib/academic-class';
+import {
+  MATERIALS_INDEX_POLL_MS,
+  materialsNeedLivePoll,
+} from '@/lib/materials-indexing-poll';
+import { useMaterialIndexingSync } from '@/hooks/use-material-indexing-sync';
+import {
+  batchSyllabusChapterIds,
+  filterSubjectsForBatchSyllabusView,
+  materialVisibleForBatch,
+  materialVisibleForClassSyllabus,
+  isFullBookMaterial,
+  mergeBatchSyllabus,
+  resolveBatchSubjectBookSections,
+  subjectHasBatchUploads,
+  subjectProgressStatsForBatch,
+  syllabusRowsFromMaterialChapters,
+  type BatchMaterialRow,
+  type BatchSubjectBookSection,
+  type CurriculumClass,
+  type SyllabusChapterRow,
+  type SyllabusSubjectRow,
+} from '@/lib/batch-syllabus';
+import { hideBatchSyllabusBook, readHiddenBatchSyllabusBooks } from '@/lib/batch-syllabus-hidden';
 import { toast } from '@/hooks/use-toast';
 import {
-  School, Users, Plus, Search,
-  GraduationCap, BookOpen, UserPlus, Trash2, Pencil, Upload, UserCog,
+  School, Users, Plus, Search, Filter, X,
+  GraduationCap, BookOpen, UserPlus, Trash2, Pencil, Upload, UserCog, ChevronDown,
 } from 'lucide-react';
 import { TableSkeleton } from '@/components/ui/skeleton';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
+import { guessSubjectId } from '@/lib/subject-guess';
 
 type Batch = {
   id: string;
@@ -40,16 +66,7 @@ type Batch = {
 
 type BatchForm = { name: string; academicYear: string; academicClassId: string };
 
-type SyllabusSubject = {
-  subject: { id: string; name: string };
-  chapters: {
-    id: string;
-    number: number;
-    title: string;
-    status: string;
-    topics?: { id: string; title: string; status?: string }[];
-  }[];
-};
+type SyllabusSubject = SyllabusSubjectRow;
 
 type TabId = 'students' | 'syllabus' | 'teachers';
 
@@ -69,23 +86,91 @@ type StaffUser = {
   userRoles: { role: { name: string } }[];
 };
 
+const BATCH_HOVER_SURFACE =
+  'hover:bg-white hover:text-foreground dark:hover:bg-white dark:hover:text-foreground';
+
+const BATCH_OUTLINE_BTN =
+  'hover:bg-white hover:text-foreground dark:hover:bg-white dark:hover:text-foreground';
+
+const BATCH_FILTER_FIELD =
+  'flex h-9 w-full rounded-md border border-border/70 bg-white px-2 text-sm text-foreground shadow-none';
+
+/** ~6 batch rows (two-line item + gap) before scrolling */
+const BATCH_LIST_SCROLL_MAX_CLASS = 'max-h-[calc(6*3.625rem+5*0.25rem)]';
+
+const SYLLABUS_MARK_SURFACE = 'bg-primary/[0.05]';
+
 const STATUS_CONFIG = {
   COMPLETED: {
     label: 'Done',
     dot: 'bg-primary',
-    active: 'bg-primary text-primary-foreground shadow-sm shadow-primary/25',
+    active: 'rounded-md bg-primary text-primary-foreground shadow-sm shadow-primary/25',
   },
   IN_PROGRESS: {
     label: 'Studying',
-    dot: 'bg-violet-500',
-    active: 'bg-violet-500 text-white shadow-sm shadow-violet-500/25',
+    dot: 'bg-primary/70',
+    active: 'rounded-md bg-primary/15 text-primary shadow-sm ring-1 ring-primary/25',
   },
   NOT_STARTED: {
     label: 'Not started',
-    dot: 'bg-muted-foreground/40',
-    active: 'bg-secondary text-secondary-foreground shadow-sm ring-1 ring-border',
+    dot: 'bg-muted-foreground/35',
+    active: 'rounded-md bg-primary/10 text-foreground shadow-sm ring-1 ring-primary/20',
   },
 };
+
+const MARK_PROGRESS_INACTIVE_TAB =
+  'rounded-md px-2.5 py-1.5 text-xs font-semibold text-muted-foreground transition-all hover:bg-primary/10 hover:text-foreground';
+
+const SYLLABUS_BOOK_ROW =
+  'rounded-xl border border-primary/15 bg-card shadow-sm transition-colors';
+
+const SYLLABUS_BOOK_ROW_HOVER =
+  'hover:border-primary/30 hover:bg-primary/[0.04]';
+
+const SYLLABUS_BOOK_ROW_OPEN =
+  'border-primary/40 bg-primary/[0.04] ring-1 ring-primary/15';
+
+const STATUS_CYCLE = ['NOT_STARTED', 'IN_PROGRESS', 'COMPLETED'] as const;
+
+function nextChapterStatus(current: string): (typeof STATUS_CYCLE)[number] {
+  const idx = STATUS_CYCLE.indexOf(current as (typeof STATUS_CYCLE)[number]);
+  return STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
+}
+
+function applyLiveChapterStatuses(
+  sections: BatchSubjectBookSection[],
+  liveStatus: ReadonlyMap<string, string>,
+): BatchSubjectBookSection[] {
+  if (!liveStatus.size) return sections;
+  return sections.map((section) => ({
+    ...section,
+    chapters: section.chapters.map((ch) => {
+      const next = liveStatus.get(ch.id);
+      return next ? { ...ch, status: next } : ch;
+    }),
+  }));
+}
+
+function patchSyllabusProgressCache(
+  queryClient: ReturnType<typeof useQueryClient>,
+  batchId: string,
+  chapterId: string,
+  status: string,
+) {
+  queryClient.setQueryData<SyllabusSubject[]>(['syllabus-progress', batchId], (old) => {
+    if (!old?.length) return old;
+    let touched = false;
+    const next = old.map((subj) => ({
+      ...subj,
+      chapters: subj.chapters.map((ch) => {
+        if (ch.id !== chapterId) return ch;
+        touched = true;
+        return { ...ch, status };
+      }),
+    }));
+    return touched ? next : old;
+  });
+}
 
 function ProgressRing({ percent, className }: { percent: number; className?: string }) {
   const size = 72;
@@ -174,6 +259,11 @@ export default function BatchesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [search, setSearch] = useState('');
+  const [filterClassLevel, setFilterClassLevel] = useState<string>('all');
+  const [filterSection, setFilterSection] = useState<string>('all');
+  const [filterSession, setFilterSession] = useState<string>('all');
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const filterPanelRef = useRef<HTMLDivElement>(null);
   const [form, setForm] = useState<BatchForm>({ name: '', academicYear: '2025-26', academicClassId: '' });
   const [editForm, setEditForm] = useState<BatchForm>({ name: '', academicYear: '', academicClassId: '' });
   const [enrollCandidateId, setEnrollCandidateId] = useState('');
@@ -181,6 +271,17 @@ export default function BatchesPage() {
   const [showDelete, setShowDelete] = useState(false);
   const [assignTeacherUserId, setAssignTeacherUserId] = useState('');
   const [assignSubjectId, setAssignSubjectId] = useState('');
+  const [syllabusHiddenRevision, setSyllabusHiddenRevision] = useState(0);
+  const [expandedBookKeys, setExpandedBookKeys] = useState<Set<string>>(() => new Set());
+  const [bookToHide, setBookToHide] = useState<BatchSubjectBookSection | null>(null);
+  /** Optimistic chapter status until syllabus-progress refetch confirms. */
+  const [liveChapterStatus, setLiveChapterStatus] = useState<Map<string, string>>(() => new Map());
+  const [progressChapterPending, setProgressChapterPending] = useState<string | null>(null);
+
+  const hiddenBookKeys = useMemo(() => {
+    void syllabusHiddenRevision;
+    return readHiddenBatchSyllabusBooks(selectedBatch ?? '');
+  }, [selectedBatch, syllabusHiddenRevision]);
 
   const { data: batches, isLoading } = useQuery({
     queryKey: ['batches'],
@@ -202,6 +303,19 @@ export default function BatchesPage() {
     refetchIntervalInBackground: false,
   });
 
+  const { data: materials } = useQuery({
+    queryKey: ['materials'],
+    queryFn: () => materialsApi.list(accessToken!) as Promise<BatchMaterialRow[]>,
+    enabled: !!accessToken && !!selectedBatch && activeTab === 'syllabus',
+    staleTime: 0,
+    refetchInterval: (query) =>
+      materialsNeedLivePoll(query.state.data as BatchMaterialRow[] | undefined)
+        ? MATERIALS_INDEX_POLL_MS
+        : false,
+  });
+
+  useMaterialIndexingSync(queryClient, materials);
+
   const { data: batchDetail } = useQuery({
     queryKey: ['batch-detail', selectedBatch],
     queryFn: () => batchesApi.get(accessToken!, selectedBatch!) as Promise<{
@@ -216,6 +330,31 @@ export default function BatchesPage() {
     }>,
     enabled: !!accessToken && !!selectedBatch,
   });
+
+  const academicClassId = batchDetail?.academicClass.id;
+  const { data: curriculumClass, isLoading: curriculumClassLoading } = useQuery({
+    queryKey: ['curriculum-class', academicClassId],
+    queryFn: () => curriculumApi.getClass(accessToken!, academicClassId!) as Promise<CurriculumClass>,
+    enabled: !!accessToken && !!academicClassId && activeTab === 'syllabus',
+  });
+
+  const batchClassLevel = batchDetail?.academicClass.level;
+
+  const { data: uploadCurriculumClasses } = useQuery({
+    queryKey: ['curriculum-from-uploads'],
+    queryFn: () =>
+      curriculumApi.getClasses(accessToken!, { uploadedOnly: true, includeTopics: true }) as Promise<CurriculumClass[]>,
+    enabled: !!accessToken && activeTab === 'syllabus',
+    staleTime: 0,
+    refetchInterval: materialsNeedLivePoll(materials) ? MATERIALS_INDEX_POLL_MS : false,
+  });
+
+  const curriculumForBatchLevel = useMemo(() => {
+    if (batchClassLevel == null) return curriculumClass ?? null;
+    const fromUploads = (uploadCurriculumClasses ?? []).find((c) => c.level === batchClassLevel);
+    if (fromUploads) return fromUploads;
+    return curriculumClass ?? null;
+  }, [batchClassLevel, uploadCurriculumClasses, curriculumClass]);
 
   const { data: candidatesData } = useQuery({
     queryKey: ['candidates-enroll'],
@@ -244,33 +383,199 @@ export default function BatchesPage() {
 
   const batchSubjects = batchDetail?.academicClass.subjects ?? [];
 
+  const batchFilterOptions = useMemo(() => {
+    const list = batches ?? [];
+    const levels = [...new Set(list.map((b) => b.academicClass.level))].sort((a, b) => a - b);
+    const sections = [...new Set(list.map((b) => batchSectionKey(b)))].sort();
+    const sessions = [...new Set(list.map((b) => b.academicYear).filter(Boolean))].sort();
+    return { levels, sections, sessions };
+  }, [batches]);
+
   const filteredBatches = useMemo(() => {
+    let list = batches ?? [];
+    if (filterClassLevel !== 'all') {
+      const level = Number(filterClassLevel);
+      list = list.filter((b) => b.academicClass.level === level);
+    }
+    if (filterSection !== 'all') {
+      list = list.filter((b) => batchSectionKey(b) === filterSection);
+    }
+    if (filterSession !== 'all') {
+      list = list.filter((b) => sessionsMatch(b.academicYear, filterSession));
+    }
     const q = search.trim().toLowerCase();
-    if (!q) return batches ?? [];
-    return (batches ?? []).filter(
-      (b) =>
-        b.name.toLowerCase().includes(q)
-        || b.academicClass.name.toLowerCase().includes(q)
-        || b.academicYear.includes(q),
-    );
-  }, [batches, search]);
+    if (q) {
+      list = list.filter(
+        (b) =>
+          b.name.toLowerCase().includes(q)
+          || b.academicClass.name.toLowerCase().includes(q)
+          || b.academicYear.includes(q)
+          || formatBatchListTitle(b).toLowerCase().includes(q),
+      );
+    }
+    return [...list].sort(compareBatchesForList);
+  }, [batches, search, filterClassLevel, filterSection, filterSession]);
+
+  const batchFiltersActive =
+    filterClassLevel !== 'all' || filterSection !== 'all' || filterSession !== 'all';
+
+  useEffect(() => {
+    if (!filterPanelOpen) return;
+    function onPointerDown(event: MouseEvent) {
+      if (!filterPanelRef.current?.contains(event.target as Node)) {
+        setFilterPanelOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [filterPanelOpen]);
 
   const selectedBatchMeta = (batches ?? []).find((b) => b.id === selectedBatch);
+
+  const siblingBatchIds = useMemo(() => {
+    if (!selectedBatchMeta) return undefined;
+    const ids = new Set<string>();
+    for (const b of batches ?? []) {
+      if (
+        b.academicClass.level === selectedBatchMeta.academicClass.level
+        && sessionsMatch(b.academicYear, selectedBatchMeta.academicYear)
+      ) {
+        ids.add(b.id);
+      }
+    }
+    return ids;
+  }, [batches, selectedBatchMeta]);
+
+  const batchMaterialsForStats = useMemo(() => {
+    if (!selectedBatch) return [];
+    return (materials ?? []).filter((m) =>
+      materialVisibleForBatch(m, selectedBatch, siblingBatchIds),
+    );
+  }, [materials, selectedBatch, siblingBatchIds]);
+
+  const syllabusMaterials = useMemo(() => {
+    if (!batchDetail) return [];
+    const level = batchDetail.academicClass.level;
+    const year = batchDetail.academicYear;
+    return batchMaterialsForStats.filter((m) =>
+      materialVisibleForClassSyllabus(m, level, year),
+    );
+  }, [batchMaterialsForStats, batchDetail]);
+
+  const mergedSyllabus = useMemo(
+    () => mergeBatchSyllabus(progress ?? [], curriculumForBatchLevel ?? null, syllabusMaterials),
+    [progress, curriculumForBatchLevel, syllabusMaterials],
+  );
+
+  const allowedChapterIds = useMemo(
+    () => batchSyllabusChapterIds(
+      mergedSyllabus.subjects,
+      syllabusMaterials,
+      curriculumForBatchLevel ?? null,
+      batchDetail?.academicClass.level,
+      hiddenBookKeys,
+    ),
+    [mergedSyllabus.subjects, syllabusMaterials, curriculumForBatchLevel, batchDetail?.academicClass.level, hiddenBookKeys],
+  );
+
   const assignedSubjectIds = useMemo(() => {
     if (!teacherPortal) return null;
     return new Set((selectedBatchMeta?.teacherAssignments ?? []).map((a) => a.subject.id));
   }, [teacherPortal, selectedBatchMeta]);
+
   const visibleProgress = useMemo(() => {
-    const rows = progress ?? [];
+    let rows: SyllabusSubject[];
+    if (curriculumForBatchLevel && !curriculumClassLoading) {
+      if (allowedChapterIds.size > 0) {
+        rows = filterSubjectsForBatchSyllabusView(mergedSyllabus.subjects, allowedChapterIds);
+      } else {
+        const merged = mergedSyllabus.subjects.filter(
+          (s) =>
+            s.chapters.length > 0
+            || subjectHasBatchUploads(batchMaterialsForStats, s.subject.id),
+        );
+        rows = merged.length ? merged : (progress ?? []);
+      }
+    } else {
+      rows = progress ?? [];
+    }
     if (!assignedSubjectIds) return rows;
     return rows.filter((row) => assignedSubjectIds.has(row.subject.id));
-  }, [progress, assignedSubjectIds]);
-  const progressStats = useMemo(() => calcProgress(visibleProgress), [visibleProgress]);
+  }, [
+    progress,
+    mergedSyllabus.subjects,
+    allowedChapterIds,
+    curriculumForBatchLevel,
+    curriculumClassLoading,
+    assignedSubjectIds,
+    batchMaterialsForStats,
+  ]);
+
+  const classSubjectHints = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; code: string }>();
+    for (const s of curriculumForBatchLevel?.subjects ?? []) {
+      map.set(s.id, { id: s.id, name: s.name, code: (s as { code?: string }).code ?? '' });
+    }
+    for (const s of curriculumClass?.subjects ?? []) {
+      map.set(s.id, { id: s.id, name: s.name, code: (s as { code?: string }).code ?? '' });
+    }
+    for (const s of batchSubjects) {
+      map.set(s.id, { id: s.id, name: s.name, code: '' });
+    }
+    return [...map.values()];
+  }, [curriculumForBatchLevel, curriculumClass, batchSubjects]);
+
+  const progressStats = useMemo(() => {
+    if (!batchMaterialsForStats.length) return calcProgress(visibleProgress);
+    let completed = 0;
+    let studied = 0;
+    let total = 0;
+    for (const sp of visibleProgress) {
+      const stats = subjectProgressStatsForBatch(batchMaterialsForStats, sp, syllabusMaterials);
+      completed += stats.completed;
+      studied += stats.studied;
+      total += stats.total;
+    }
+    return {
+      percent: total ? Math.round((completed / total) * 100) : 0,
+      studied,
+      total,
+      completed,
+    };
+  }, [visibleProgress, batchMaterialsForStats, syllabusMaterials]);
 
   const activeSubject = useMemo(() => {
     if (!visibleProgress.length) return null;
     return visibleProgress.find((s) => s.subject.id === selectedSubjectId) ?? visibleProgress[0];
   }, [visibleProgress, selectedSubjectId]);
+
+  const materialsForActiveSubject = useMemo(() => {
+    if (!activeSubject || batchClassLevel == null || !batchDetail) return syllabusMaterials;
+    const level = batchClassLevel;
+    const year = batchDetail.academicYear;
+    const pool = batchMaterialsForStats.filter(
+      (m) => m.academicClass?.level === level && materialVisibleForClassSyllabus(m, level, year),
+    );
+    const subjectName = activeSubject.subject.name.trim().toLowerCase();
+    const matched = pool.filter((m) => {
+      const guessed = guessSubjectId(
+        m.fileName ?? m.title,
+        m.title,
+        classSubjectHints,
+        m.subjectId ?? m.subject?.id ?? null,
+      );
+      if (guessed === activeSubject.subject.id) return true;
+      return (m.subject?.name ?? '').trim().toLowerCase() === subjectName;
+    });
+    return matched.length ? matched : syllabusMaterials;
+  }, [
+    activeSubject,
+    batchClassLevel,
+    batchDetail,
+    batchMaterialsForStats,
+    syllabusMaterials,
+    classSubjectHints,
+  ]);
 
   useEffect(() => {
     if (batchFromQuery && batches?.some((b) => b.id === batchFromQuery)) {
@@ -278,7 +583,8 @@ export default function BatchesPage() {
       return;
     }
     if (!selectedBatch && batches?.length) {
-      setSelectedBatch(batches[0].id);
+      const first = [...batches].sort(compareBatchesForList)[0];
+      setSelectedBatch(first.id);
     }
   }, [batches, selectedBatch, batchFromQuery]);
 
@@ -294,7 +600,226 @@ export default function BatchesPage() {
     setSelectedSubjectId(null);
     setAssignTeacherUserId('');
     setAssignSubjectId('');
+    setExpandedBookKeys(new Set());
+    setBookToHide(null);
+    setLiveChapterStatus(new Map());
+    setSyllabusHiddenRevision((n) => n + 1);
   }, [selectedBatch]);
+
+  useEffect(() => {
+    if (!progress?.length || liveChapterStatus.size === 0) return;
+    setLiveChapterStatus((prev) => {
+      if (!prev.size) return prev;
+      const serverStatus = new Map<string, string>();
+      for (const subj of progress) {
+        for (const ch of subj.chapters) {
+          serverStatus.set(ch.id, ch.status);
+        }
+      }
+      let changed = false;
+      const next = new Map(prev);
+      for (const [chapterId, optimistic] of prev) {
+        if (serverStatus.get(chapterId) === optimistic) {
+          next.delete(chapterId);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [progress, liveChapterStatus.size]);
+
+  const allCurriculumBooks = useMemo(() => {
+    const books = [
+      ...(curriculumForBatchLevel?.subjects.flatMap((s) => s.books) ?? []),
+      ...(curriculumClass?.subjects.flatMap((s) => s.books) ?? []),
+    ];
+    const seen = new Set<string>();
+    return books.filter((b) => {
+      if (seen.has(b.id)) return false;
+      seen.add(b.id);
+      return true;
+    });
+  }, [curriculumForBatchLevel, curriculumClass]);
+
+  const activeSubjectBookSections = useMemo(() => {
+    if (!activeSubject) return [];
+    const curriculumBooks =
+      curriculumForBatchLevel?.subjects.find((s) => s.id === activeSubject.subject.id)?.books
+      ?? curriculumClass?.subjects.find((s) => s.id === activeSubject.subject.id)?.books
+      ?? [];
+    return resolveBatchSubjectBookSections(
+      activeSubject,
+      materialsForActiveSubject,
+      curriculumBooks,
+      {
+        classLevel: batchClassLevel,
+        allCurriculumBooks,
+        hiddenKeys: hiddenBookKeys,
+      },
+    );
+  }, [
+    activeSubject,
+    curriculumForBatchLevel,
+    curriculumClass,
+    materialsForActiveSubject,
+    batchClassLevel,
+    allCurriculumBooks,
+    hiddenBookKeys,
+  ]);
+
+  const fullBookMaterialIds = useMemo(
+    () => materialsForActiveSubject.filter(isFullBookMaterial).map((m) => m.id),
+    [materialsForActiveSubject],
+  );
+
+  const { data: extractedChaptersByMaterial } = useQuery({
+    queryKey: ['material-extracted-chapters', selectedBatch, ...fullBookMaterialIds],
+    queryFn: async () => {
+      const map = new Map<
+        string,
+        {
+          chapters: { id: string; chapterNumber: number; title: string }[];
+          extractionFailed: boolean;
+        }
+      >();
+      await Promise.all(
+        fullBookMaterialIds.map(async (materialId) => {
+          const res = await materialsApi.chapters(accessToken!, materialId) as {
+            chapters: { id: string; chapterNumber: number; title: string }[];
+            extractionFailed?: boolean;
+          };
+          map.set(materialId, {
+            chapters: res.chapters ?? [],
+            extractionFailed: Boolean(res.extractionFailed),
+          });
+        }),
+      );
+      return map;
+    },
+    enabled: !!accessToken && !!selectedBatch && activeTab === 'syllabus' && fullBookMaterialIds.length > 0,
+    staleTime: 15_000,
+  });
+
+  const activeSubjectBookSectionsDisplay = useMemo(() => {
+    if (!activeSubject) return activeSubjectBookSections;
+    return activeSubjectBookSections.map((section) => {
+      if (!section.materialId) return section;
+      const raw = extractedChaptersByMaterial?.get(section.materialId);
+      const apiChapters = Array.isArray(raw)
+        ? raw
+        : (raw?.chapters ?? []);
+      const extractionFailed = Array.isArray(raw)
+        ? false
+        : Boolean(raw?.extractionFailed);
+      if (apiChapters.length > 0) {
+        return {
+          ...section,
+          extractionFailed: false,
+          chapters: syllabusRowsFromMaterialChapters(
+            activeSubject.chapters,
+            apiChapters,
+            section.bookId,
+          ),
+        };
+      }
+      if (section.isUpload) {
+        return {
+          ...section,
+          chapters: [],
+          extractionFailed,
+        };
+      }
+      return section;
+    });
+  }, [activeSubject, activeSubjectBookSections, extractedChaptersByMaterial]);
+
+  const activeSubjectBookSectionsLive = useMemo(
+    () => applyLiveChapterStatuses(activeSubjectBookSectionsDisplay, liveChapterStatus),
+    [activeSubjectBookSectionsDisplay, liveChapterStatus],
+  );
+
+  const activeBookSectionKeys = useMemo(
+    () => activeSubjectBookSectionsLive.map((s) => s.key).join('|'),
+    [activeSubjectBookSectionsLive],
+  );
+
+  useEffect(() => {
+    if (!activeSubject?.subject.id) return;
+    if (activeSubjectBookSectionsLive.length > 0) {
+      setExpandedBookKeys(new Set([activeSubjectBookSectionsLive[0].key]));
+    } else {
+      setExpandedBookKeys(new Set());
+    }
+  }, [activeSubject?.subject.id, activeBookSectionKeys, activeSubjectBookSectionsLive.length]);
+
+  function toggleBookExpanded(bookKey: string) {
+    setExpandedBookKeys((current) => {
+      const next = new Set(current);
+      if (next.has(bookKey)) next.delete(bookKey);
+      else next.add(bookKey);
+      return next;
+    });
+  }
+
+  function renderChapterRow(ch: SyllabusChapterRow) {
+    const st = STATUS_CONFIG[ch.status as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.NOT_STARTED;
+    const rowPending = progressChapterPending === ch.id;
+    return (
+      <div
+        key={ch.id}
+        className="rounded-2xl border border-primary/10 bg-card/80 px-3.5 py-3 transition-colors hover:border-primary/20 hover:bg-card"
+      >
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <button
+            type="button"
+            disabled={rowPending}
+            title="Click to cycle: Not started → Studying → Done"
+            onClick={() => updateProgress.mutate({
+              chapterId: ch.id,
+              status: nextChapterStatus(ch.status),
+            })}
+            className={cn(
+              'flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left transition-colors',
+              'cursor-pointer hover:bg-primary/5 disabled:cursor-wait disabled:opacity-70',
+            )}
+          >
+            <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full ring-2 ring-background', st.dot)} />
+            <p className="min-w-0 truncate text-sm font-semibold text-foreground">
+              <span className="mr-2 inline-flex rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[11px] font-bold text-primary">
+                Ch.{ch.number}
+              </span>
+              {ch.title}
+            </p>
+          </button>
+          <div
+            className="flex shrink-0 flex-wrap gap-0.5 rounded-lg border border-primary/15 bg-primary/[0.04] p-0.5 shadow-inner sm:ml-4"
+            role="group"
+            aria-label={`Progress for chapter ${ch.number}`}
+          >
+            {STATUS_CYCLE.map((s) => {
+              const cfg = STATUS_CONFIG[s];
+              const active = ch.status === s;
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  disabled={rowPending}
+                  aria-pressed={active}
+                  onClick={() => updateProgress.mutate({ chapterId: ch.id, status: s })}
+                  className={cn(
+                    'min-w-[4.5rem] px-2.5 py-1.5 text-xs font-semibold transition-all disabled:opacity-60',
+                    active ? cfg.active : MARK_PROGRESS_INACTIVE_TAB,
+                  )}
+                >
+                  {cfg.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const totalStudents = useMemo(
     () => (batches ?? []).reduce((sum, b) => sum + b._count.enrollments, 0),
@@ -398,7 +923,44 @@ export default function BatchesPage() {
   const updateProgress = useMutation({
     mutationFn: ({ chapterId, status }: { chapterId: string; status: string }) =>
       batchesApi.updateSyllabusProgress(accessToken!, selectedBatch!, { chapterId, status }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['syllabus-progress'] }),
+    onMutate: async ({ chapterId, status }) => {
+      if (!selectedBatch) return {};
+      setProgressChapterPending(chapterId);
+      setLiveChapterStatus((prev) => {
+        const next = new Map(prev);
+        next.set(chapterId, status);
+        return next;
+      });
+      await queryClient.cancelQueries({ queryKey: ['syllabus-progress', selectedBatch] });
+      const previous = queryClient.getQueryData<SyllabusSubject[]>([
+        'syllabus-progress',
+        selectedBatch,
+      ]);
+      patchSyllabusProgressCache(queryClient, selectedBatch, chapterId, status);
+      return { previous, chapterId };
+    },
+    onError: (e: Error, { chapterId }, context) => {
+      if (selectedBatch && context?.previous) {
+        queryClient.setQueryData(['syllabus-progress', selectedBatch], context.previous);
+      }
+      setLiveChapterStatus((prev) => {
+        if (!prev.has(chapterId)) return prev;
+        const next = new Map(prev);
+        next.delete(chapterId);
+        return next;
+      });
+      toast({
+        title: 'Could not update progress',
+        description: e.message,
+        variant: 'destructive',
+      });
+    },
+    onSettled: () => {
+      setProgressChapterPending(null);
+      if (selectedBatch) {
+        void queryClient.invalidateQueries({ queryKey: ['syllabus-progress', selectedBatch] });
+      }
+    },
   });
 
   const enrolledIds = new Set((batchDetail?.enrollments ?? []).map((e) => e.candidate.id));
@@ -460,14 +1022,14 @@ export default function BatchesPage() {
           </Button>
         )}
         {(can(Permission.MATERIAL_UPLOAD) || (!teacherPortal && can(Permission.MATERIAL_READ))) && (
-          <Button variant="outline" asChild>
+          <Button variant="outline" asChild className={BATCH_OUTLINE_BTN}>
             <Link href="/dashboard/materials">
               <Upload className="mr-2 h-4 w-4" /> Books
             </Link>
           </Button>
         )}
         {can(Permission.CURRICULUM_READ) && !teacherPortal && (
-          <Button variant="outline" asChild>
+          <Button variant="outline" asChild className={BATCH_OUTLINE_BTN}>
             <Link href="/dashboard/syllabus">
               <BookOpen className="mr-2 h-4 w-4" /> Syllabus
             </Link>
@@ -485,33 +1047,110 @@ export default function BatchesPage() {
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         {/* Batch list */}
-        <Card className="surface-card h-fit">
-          <CardHeader className="space-y-3 pb-3">
-            <div className="flex items-center justify-between">
+        <Card className="surface-card relative h-fit overflow-visible bg-white">
+          <CardHeader className="space-y-2 pb-2">
+            <div className="flex items-center justify-between gap-2">
               <CardTitle className="text-base">Batches</CardTitle>
-              <span className="text-xs text-muted-foreground tabular-nums">{filteredBatches.length}</span>
+              <div className="flex items-center gap-1.5">
+                <div ref={filterPanelRef} className="relative">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className={cn('h-8 w-8 shrink-0', BATCH_OUTLINE_BTN)}
+                    aria-expanded={filterPanelOpen}
+                    aria-haspopup="dialog"
+                    aria-label="Filter batches"
+                    title="Filters"
+                    onClick={() => setFilterPanelOpen((open) => !open)}
+                  >
+                    <Filter className="h-4 w-4" />
+                    {batchFiltersActive && (
+                      <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-primary ring-2 ring-card" />
+                    )}
+                  </Button>
+                  {filterPanelOpen && (
+                    <div
+                      role="dialog"
+                      aria-label="Batch filters"
+                      className="absolute z-50 w-[min(calc(100vw-2rem),18rem)] rounded-xl border border-border/60 bg-white p-4 text-foreground shadow-lg max-lg:left-0 max-lg:top-full max-lg:mt-2 dark:border-border/60 dark:bg-white lg:left-full lg:top-0 lg:ml-2"
+                    >
+                      <div className="mb-3 flex items-start justify-between gap-2">
+                        <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                          Filter batches
+                        </p>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className={cn('h-7 w-7 shrink-0 text-muted-foreground', BATCH_OUTLINE_BTN)}
+                          aria-label="Close filters"
+                          onClick={() => setFilterPanelOpen(false)}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="space-y-1">
+                          <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">Class</Label>
+                          <select className={BATCH_FILTER_FIELD} value={filterClassLevel} onChange={(e) => setFilterClassLevel(e.target.value)}>
+                            <option value="all">All classes</option>
+                            {batchFilterOptions.levels.map((level) => (
+                              <option key={level} value={String(level)}>Class {level}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">Section</Label>
+                          <select className={BATCH_FILTER_FIELD} value={filterSection} onChange={(e) => setFilterSection(e.target.value)}>
+                            <option value="all">All sections</option>
+                            {batchFilterOptions.sections.map((section) => (
+                              <option key={section} value={section}>{section}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">Session</Label>
+                          <select className={BATCH_FILTER_FIELD} value={filterSession} onChange={(e) => setFilterSession(e.target.value)}>
+                            <option value="all">All sessions</option>
+                            {batchFilterOptions.sessions.map((session) => (
+                              <option key={session} value={session}>{session}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <span className="text-xs text-muted-foreground tabular-nums">{filteredBatches.length}</span>
+              </div>
             </div>
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Search…"
-                className="pl-9"
+                placeholder="Search batches…"
+                aria-label="Search batches"
+                className="h-9 border-border/70 bg-white pl-9 text-sm text-foreground shadow-none"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
           </CardHeader>
-          <CardContent className="space-y-1 p-2 pt-0">
+          <CardContent className={cn('space-y-1 overflow-y-auto p-2 pt-0', BATCH_LIST_SCROLL_MAX_CLASS)}>
             {isLoading ? (
               <TableSkeleton rows={4} />
             ) : filteredBatches.length === 0 ? (
               <div className="px-2 py-6">
                 <EmptyState
                   icon={School}
-                  title={search ? 'No matches' : 'No batches yet'}
-                  description={search ? 'Try a different search.' : 'Create a batch to get started.'}
+                  title={search || batchFiltersActive ? 'No matches' : 'No batches yet'}
+                  description={
+                    search || batchFiltersActive
+                      ? 'Try different filters or search.'
+                      : 'Create a batch to get started.'
+                  }
                 />
-                {canManage && !search && (
+                {canManage && !search && !batchFiltersActive && (
                   <div className="flex justify-center pb-2">
                     <Button size="sm" onClick={() => setShowCreate(true)}>
                       <Plus className="mr-2 h-4 w-4" /> Create batch
@@ -528,22 +1167,20 @@ export default function BatchesPage() {
                     type="button"
                     onClick={() => setSelectedBatch(batch.id)}
                     className={cn(
-                      'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
+                      'flex w-full items-center rounded-lg px-3 py-2.5 text-left transition-colors',
                       isActive
                         ? 'bg-primary/10 text-foreground'
-                        : 'hover:bg-muted/60',
+                        : BATCH_HOVER_SURFACE,
                     )}
                   >
-                    <span className={cn(
-                      'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xs font-bold',
-                      isActive ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
-                    )}>
-                      {batch.academicClass.level}
-                    </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-semibold">{batch.name}</span>
+                      <span className="block truncate text-sm font-semibold">
+                        {formatBatchListTitle(batch)}
+                      </span>
                       <span className="block truncate text-xs text-muted-foreground">
-                        {batch.academicClass.name} · {batch._count.enrollments} students
+                        {batch.academicYear}
+                        {' · '}
+                        {batch._count.enrollments} student{batch._count.enrollments === 1 ? '' : 's'}
                       </span>
                     </span>
                   </button>
@@ -631,7 +1268,11 @@ export default function BatchesPage() {
                         'inline-flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
                         activeTab === id
                           ? 'border-primary text-foreground'
-                          : 'border-transparent text-muted-foreground hover:text-foreground',
+                          : cn(
+                              'border-transparent text-muted-foreground hover:text-foreground',
+                              BATCH_HOVER_SURFACE,
+                              'rounded-t-md',
+                            ),
                       )}
                     >
                       <Icon className="h-4 w-4" />
@@ -856,7 +1497,9 @@ export default function BatchesPage() {
                     <>
                       <div className="flex flex-wrap gap-2">
                         {visibleProgress.map((sp) => {
-                          const subjProgress = calcProgress([sp]);
+                          const subjProgress = batchMaterialsForStats.length
+                            ? subjectProgressStatsForBatch(batchMaterialsForStats, sp, syllabusMaterials)
+                            : calcProgress([sp]);
                           const isActive = activeSubject?.subject.id === sp.subject.id;
                           return (
                             <button
@@ -864,16 +1507,18 @@ export default function BatchesPage() {
                               type="button"
                               onClick={() => setSelectedSubjectId(sp.subject.id)}
                               className={cn(
-                                'rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                                'inline-flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-semibold transition-all',
                                 isActive
-                                  ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-                                  : 'border-border/60 bg-card hover:border-primary/40 hover:bg-muted/40',
+                                  ? 'bg-primary text-primary-foreground shadow-md shadow-primary/25'
+                                  : cn(SYLLABUS_MARK_SURFACE, 'text-foreground hover:bg-primary/10'),
                               )}
                             >
                               {sp.subject.name}
                               <span className={cn(
-                                'ml-2 rounded-full px-1.5 py-0.5 text-[10px] font-bold',
-                                isActive ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                                'rounded-full px-2 py-0.5 text-[10px] font-bold tabular-nums',
+                                isActive
+                                  ? 'bg-primary-foreground/20 text-primary-foreground'
+                                  : 'bg-background/70 text-muted-foreground',
                               )}>
                                 {subjProgress.percent}%
                               </span>
@@ -883,63 +1528,102 @@ export default function BatchesPage() {
                       </div>
 
                       {activeSubject && (
-                        <Card className="surface-card">
-                          <CardHeader className="border-b border-border/60 pb-4">
-                            <div className="flex items-center justify-between gap-4">
+                        <Card className="overflow-hidden border-primary/15 bg-white shadow-sm">
+                          <CardHeader className="border-b border-primary/10 bg-white pb-4">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                               <div>
-                                <CardTitle className="text-lg">{activeSubject.subject.name}</CardTitle>
+                                <CardTitle className="text-xl font-bold tracking-tight">
+                                  {activeSubject.subject.name}
+                                </CardTitle>
                                 <p className="mt-1 text-sm text-muted-foreground">
-                                  Mark chapters so AI tests only use studied content.
+                                  Extracted books — click to expand chapters
                                 </p>
                               </div>
-                              <Badge variant="outline" className="normal-case tracking-normal shrink-0">
+                              <Badge
+                                variant="outline"
+                                className="w-fit shrink-0 rounded-full border-primary/15 bg-background/80 px-3 py-1 text-sm font-semibold normal-case tracking-normal text-foreground"
+                              >
                                 {activeSubject.chapters.filter((c) => c.status === 'COMPLETED').length}
-                                /{activeSubject.chapters.length} done
+                                /{activeSubject.chapters.length} chapters done
                               </Badge>
                             </div>
                           </CardHeader>
-                          <CardContent className="space-y-1.5 p-3 sm:p-4">
-                            {activeSubject.chapters.map((ch) => {
-                              const st = STATUS_CONFIG[ch.status as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.NOT_STARTED;
-                              return (
-                                <div
-                                  key={ch.id}
-                                  className="rounded-xl border border-border/40 bg-muted/15 px-3.5 py-3 transition-colors hover:border-border/70 hover:bg-muted/35"
-                                >
-                                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                    <div className="flex min-w-0 items-center gap-3">
-                                      <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full ring-2 ring-background', st.dot)} />
-                                      <p className="min-w-0 truncate text-sm font-semibold">
-                                        <span className="mr-1.5 inline-flex rounded-md bg-background px-1.5 py-0.5 font-mono text-[11px] text-primary shadow-sm">
-                                          Ch.{ch.number}
-                                        </span>
-                                        {ch.title}
-                                      </p>
-                                    </div>
-                                    <div className="flex shrink-0 gap-0.5 rounded-lg border border-border/60 bg-card p-0.5 shadow-sm sm:ml-4">
-                                      {(['NOT_STARTED', 'IN_PROGRESS', 'COMPLETED'] as const).map((s) => {
-                                        const cfg = STATUS_CONFIG[s];
-                                        const active = ch.status === s;
-                                        return (
-                                          <button
-                                            key={s}
-                                            type="button"
-                                            disabled={updateProgress.isPending}
-                                            onClick={() => updateProgress.mutate({ chapterId: ch.id, status: s })}
+                          <CardContent className="space-y-3 p-3 sm:p-4">
+                            {activeSubjectBookSectionsLive.length > 0 ? (
+                              <div className="space-y-3">
+                                {activeSubjectBookSectionsLive.map((bookSection) => {
+                                  const open = expandedBookKeys.has(bookSection.key);
+                                  const completed = bookSection.chapters.filter(
+                                    (c) => c.status === 'COMPLETED',
+                                  ).length;
+                                  return (
+                                    <div
+                                      key={bookSection.key}
+                                      className={cn(
+                                        'group/book overflow-hidden',
+                                        SYLLABUS_BOOK_ROW,
+                                        open ? SYLLABUS_BOOK_ROW_OPEN : SYLLABUS_BOOK_ROW_HOVER,
+                                      )}
+                                    >
+                                      <div className="flex items-stretch gap-0.5 px-2 py-1 sm:px-3">
+                                        <button
+                                          type="button"
+                                          className="flex min-w-0 flex-1 items-center justify-between gap-2 py-3 pl-1 pr-2 text-left"
+                                          onClick={() => toggleBookExpanded(bookSection.key)}
+                                        >
+                                          <span className="min-w-0">
+                                            <span className="block truncate text-base font-semibold text-foreground">
+                                              {bookSection.title}
+                                            </span>
+                                            <span className="text-xs text-muted-foreground">
+                                              {bookSection.chapters.length} chapter
+                                              {bookSection.chapters.length === 1 ? '' : 's'}
+                                              {' · '}
+                                              {completed} done
+                                            </span>
+                                          </span>
+                                          <ChevronDown
                                             className={cn(
-                                              'rounded-md px-2.5 py-1.5 text-xs font-semibold transition-all',
-                                              active ? cfg.active : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                                              'h-4 w-4 shrink-0 text-muted-foreground transition-transform',
+                                              !open && '-rotate-90',
                                             )}
+                                          />
+                                        </button>
+                                        {!teacherPortal && (
+                                          <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-9 w-9 shrink-0 self-center text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                            title="Remove from this batch"
+                                            onClick={() => setBookToHide(bookSection)}
                                           >
-                                            {cfg.label}
-                                          </button>
-                                        );
-                                      })}
+                                            <Trash2 className="h-4 w-4" />
+                                          </Button>
+                                        )}
+                                      </div>
+                                      {open && (
+                                        <div className="space-y-2 border-t border-primary/10 bg-background/50 px-3 pb-3 pt-2 sm:px-4">
+                                          {bookSection.chapters.length === 0 ? (
+                                            <p className="rounded-lg border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
+                                              {bookSection.extractionFailed
+                                                ? 'Chapter extraction failed for this PDF. Re-upload or use Re-index on Materials once the file has a readable table of contents.'
+                                                : 'No chapters extracted yet. Wait for indexing to finish on Materials.'}
+                                            </p>
+                                          ) : (
+                                            bookSection.chapters.map((ch) => renderChapterRow(ch))
+                                          )}
+                                        </div>
+                                      )}
                                     </div>
-                                  </div>
-                                </div>
-                              );
-                            })}
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <p className="rounded-lg border border-dashed border-primary/20 px-3 py-6 text-center text-sm text-muted-foreground">
+                                No chapters for this subject yet. Upload a full-book PDF under Materials and wait for indexing.
+                              </p>
+                            )}
                           </CardContent>
                         </Card>
                       )}
@@ -951,6 +1635,45 @@ export default function BatchesPage() {
           )}
         </div>
       </div>
+
+      <Dialog open={!!bookToHide} onOpenChange={(open) => { if (!open) setBookToHide(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove book from this batch?</DialogTitle>
+            <DialogDescription>
+              {bookToHide
+                ? `"${bookToHide.title}" will be hidden on this batch only. The upload stays in Materials and Syllabus.`
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => setBookToHide(null)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                if (!selectedBatch || !bookToHide) return;
+                hideBatchSyllabusBook(selectedBatch, bookToHide.hideKey);
+                setSyllabusHiddenRevision((n) => n + 1);
+                setExpandedBookKeys((current) => {
+                  const next = new Set(current);
+                  next.delete(bookToHide.key);
+                  return next;
+                });
+                setBookToHide(null);
+                toast({
+                  title: 'Book removed from this batch',
+                  description: 'It is still available in Materials and Syllabus.',
+                });
+              }}
+            >
+              Remove from batch
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showCreate} onOpenChange={setShowCreate}>
         <DialogContent>

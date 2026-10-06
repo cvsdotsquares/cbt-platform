@@ -37,8 +37,8 @@ export default function MfaPage() {
       };
       sessionStorage.removeItem('mfa-token');
       const roles = normalizeRoles(result.user.roles);
-      const isAdminUser = await setAuth({ ...result.user, roles } as never, result.accessToken, result.refreshToken);
-      redirectAfterLogin(isAdminUser);
+      await setAuth({ ...result.user, roles } as never, result.accessToken, result.refreshToken);
+      redirectAfterLogin(roles);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Verification failed');
     } finally {

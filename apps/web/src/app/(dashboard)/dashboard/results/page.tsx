@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type MouseEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -28,13 +28,17 @@ import Link from 'next/link';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
 import { AnswerReviewDialog } from '@/components/results/answer-review-dialog';
+import { buildSubjectNameLookup, classTestSubjectLabel } from '@/lib/class-test-subject-label';
+import {
+  CLASS_TEST_DELETE_BLOCKED_TITLE,
+  classTestDeleteBlockedReason,
+} from '@/lib/class-test-delete';
 
 function questionCount(exam: ExamListItem) {
   return (exam.sections || []).reduce((sum, s) => sum + (s._count?.questions ?? 0), 0);
 }
 
 type ClassTab = 'all' | string;
-type StatusTab = 'all' | 'published' | 'draft';
 
 function examClassId(exam: ExamListItem): string | undefined {
   return exam.aiTestConfig?.batch?.academicClass?.id;
@@ -52,20 +56,22 @@ export default function ResultsPage() {
   const queryClient = useQueryClient();
   const [selectedExam, setSelectedExam] = useState('');
   const [classTab, setClassTab] = useState<ClassTab>('all');
-  const [statusTab, setStatusTab] = useState<StatusTab>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [reviewResultId, setReviewResultId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string; code: string } | null>(null);
 
   const { data: exams, isLoading: examsLoading } = useQuery({
-    queryKey: ['exams'],
-    queryFn: () => examsApi.list(accessToken!),
+    queryKey: ['exams', 'published-for-results'],
+    queryFn: () => examsApi.list(accessToken!, 1, '', 100, true),
     enabled: !!accessToken,
   });
 
   const { data: classes } = useQuery({
     queryKey: ['curriculum-classes'],
-    queryFn: () => curriculumApi.getClasses(accessToken!) as Promise<{ id: string; level: number; name: string }[]>,
+    queryFn: () => curriculumApi.getClasses(accessToken!) as Promise<{
+      id: string; level: number; name: string;
+      subjects: { id: string; name: string }[];
+    }[]>,
     enabled: !!accessToken,
   });
 
@@ -74,8 +80,12 @@ export default function ResultsPage() {
     [classes],
   );
 
+  const subjectNameById = useMemo(() => buildSubjectNameLookup(classes ?? []), [classes]);
+
   const classTests = useMemo(() => {
-    const items = (exams?.items ?? []).filter((e) => e.aiTestConfig);
+    const items = (exams?.items ?? []).filter(
+      (e) => e.aiTestConfig && isPublishedExamStatus(e.status),
+    );
     return [...items].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
   }, [exams]);
 
@@ -103,38 +113,20 @@ export default function ResultsPage() {
     return classTests.filter((exam) => examClassId(exam) === classTab);
   }, [classTests, classTab]);
 
-  const publishedTestCount = useMemo(
-    () => classTestsForClass.filter((e) => isPublishedExamStatus(e.status)).length,
-    [classTestsForClass],
-  );
-  const draftTestCount = useMemo(
-    () => classTestsForClass.filter((e) => e.status === 'DRAFT').length,
-    [classTestsForClass],
-  );
-
-  const classTestsForTab = useMemo(() => {
-    if (statusTab === 'published') {
-      return classTestsForClass.filter((e) => isPublishedExamStatus(e.status));
-    }
-    if (statusTab === 'draft') {
-      return classTestsForClass.filter((e) => e.status === 'DRAFT');
-    }
-    return classTestsForClass;
-  }, [classTestsForClass, statusTab]);
-
   const activeClassMeta = classTab !== 'all' ? sortedClasses.find((c) => c.id === classTab) : undefined;
 
   const filteredClassTests = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
-    if (!query) return classTestsForTab;
+    if (!query) return classTestsForClass;
 
-    return classTestsForTab.filter((exam) => {
+    return classTestsForClass.filter((exam) => {
       const batch = exam.aiTestConfig?.batch;
       const batchText = [batch?.academicClass?.name, batch?.name].filter(Boolean).join(' ');
-      const haystack = [exam.title, exam.code, batchText].join(' ').toLowerCase();
+      const subjectLabel = classTestSubjectLabel(exam, subjectNameById);
+      const haystack = [exam.title, subjectLabel, batchText].join(' ').toLowerCase();
       return haystack.includes(query);
     });
-  }, [classTestsForTab, searchTerm]);
+  }, [classTestsForClass, searchTerm, subjectNameById]);
 
   const filteredResultItems = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
@@ -176,20 +168,43 @@ export default function ResultsPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => examsApi.remove(accessToken!, id),
     onSuccess: (_data, id) => {
-      queryClient.invalidateQueries({ queryKey: ['exams'] });
+      queryClient.invalidateQueries({ queryKey: ['exams', 'published-for-results'] });
       queryClient.removeQueries({ queryKey: ['results', id] });
       if (selectedExam === id) setSelectedExam('');
       setDeleteTarget(null);
-      toast({ title: 'Class test deleted', variant: 'success' });
+      toast({ title: 'Class test deleted.', variant: 'success' });
     },
-    onError: (e: Error) => toast({ title: 'Cannot delete exam', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({
+      title: CLASS_TEST_DELETE_BLOCKED_TITLE,
+      description: e.message,
+      variant: 'destructive',
+    }),
   });
 
-  function canDeleteExam(exam: ExamListItem) {
-    if (exam.status === 'COMPLETED') return false;
-    if ((exam._count?.sessions ?? 0) > 0) return false;
-    if ((exam._count?.results ?? 0) > 0) return false;
-    return true;
+  async function handleDeleteClick(exam: ExamListItem, e?: MouseEvent) {
+    e?.stopPropagation();
+    let latest: ExamListItem = exam;
+    if (accessToken) {
+      try {
+        const fresh = await queryClient.fetchQuery({
+          queryKey: ['exams', 'published-for-results'],
+          queryFn: () => examsApi.list(accessToken!, 1, '', 100, true),
+        });
+        latest = (fresh?.items ?? []).find((item) => item.id === exam.id) ?? exam;
+      } catch {
+        /* use card row */
+      }
+    }
+    const reason = classTestDeleteBlockedReason(latest);
+    if (reason) {
+      toast({
+        title: CLASS_TEST_DELETE_BLOCKED_TITLE,
+        description: reason,
+        variant: 'destructive',
+      });
+      return;
+    }
+    setDeleteTarget({ id: exam.id, title: exam.title, code: exam.code });
   }
 
   async function exportCsv() {
@@ -227,16 +242,16 @@ export default function ResultsPage() {
         />
 
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3">
-          <StatCard title="Class tests" value={classTestsForTab.length} icon={FileSpreadsheet} accent="blue" />
+          <StatCard title="Published tests" value={classTestsForClass.length} icon={FileSpreadsheet} accent="blue" />
           <StatCard
             title="With submissions"
-            value={classTestsForTab.filter((e) => (e._count?.results ?? 0) > 0 || (e._count?.sessions ?? 0) > 0).length}
+            value={classTestsForClass.filter((e) => (e._count?.results ?? 0) > 0 || (e._count?.sessions ?? 0) > 0).length}
             icon={Users}
             accent="green"
           />
           <StatCard
-            title="Published"
-            value={classTestsForTab.filter((e) => isPublishedExamStatus(e.status)).length}
+            title="Ready to publish"
+            value={classTestsForClass.filter((e) => (e._count?.results ?? 0) > 0).length}
             icon={CheckCircle2}
             accent="violet"
           />
@@ -247,7 +262,7 @@ export default function ResultsPage() {
         ) : (
           <div className="space-y-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <HorizontalTabScroller className="min-w-0 flex-1 sm:pb-0">
+              <HorizontalTabScroller className="min-w-0 flex-1">
                 <button
                   type="button"
                   onClick={() => setClassTab('all')}
@@ -296,56 +311,14 @@ export default function ResultsPage() {
                   );
                 })}
               </HorizontalTabScroller>
-              <div className="flex shrink-0 gap-2 pb-2 sm:pb-0">
-                <button
-                  type="button"
-                  onClick={() => setStatusTab((s) => (s === 'published' ? 'all' : 'published'))}
-                  className={cn(
-                    'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
-                    statusTab === 'published'
-                      ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-                      : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
-                  )}
-                >
-                  Published
-                  {publishedTestCount > 0 && (
-                    <span className={cn(
-                      'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
-                      statusTab === 'published' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
-                    )}>
-                      {publishedTestCount}
-                    </span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStatusTab((s) => (s === 'draft' ? 'all' : 'draft'))}
-                  className={cn(
-                    'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
-                    statusTab === 'draft'
-                      ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-                      : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
-                  )}
-                >
-                  Draft
-                  {draftTestCount > 0 && (
-                    <span className={cn(
-                      'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
-                      statusTab === 'draft' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
-                    )}>
-                      {draftTestCount}
-                    </span>
-                  )}
-                </button>
-              </div>
             </div>
 
             {classTests.length === 0 ? (
               <Card className="surface-card">
                 <EmptyState
                   icon={Award}
-                  title="No class tests yet"
-                  description="Create and publish a class test first. Once students submit, their scores will appear here."
+                  title="No published class tests yet"
+                  description="Publish a class test from Class Tests first. Once students submit, their scores will appear here."
                 />
                 <div className="flex justify-center gap-3 pb-8">
                   <Button asChild>
@@ -358,25 +331,19 @@ export default function ResultsPage() {
                   </Button>
                 </div>
               </Card>
-            ) : classTestsForTab.length === 0 ? (
+            ) : classTestsForClass.length === 0 ? (
               <Card className="surface-card">
                 <EmptyState
                   icon={GraduationCap}
                   title={
-                    statusTab === 'published'
-                      ? 'No published class tests'
-                      : statusTab === 'draft'
-                        ? 'No draft class tests'
-                        : activeClassMeta
-                          ? `No class tests for ${activeClassMeta.name}`
-                          : 'No class tests in this class'
+                    activeClassMeta
+                      ? `No published class tests for ${activeClassMeta.name}`
+                      : 'No published class tests yet'
                   }
                   description={
-                    statusTab === 'published'
-                      ? 'Publish a class test from Class Tests, or switch to All classes to see every test.'
-                      : statusTab === 'draft'
-                        ? 'Drafts are tests still being set up. Create one from Create Class Test, or view all tests.'
-                        : 'Create a class test for this grade, or switch to All classes to see every test.'
+                    activeClassMeta
+                      ? 'Publish a class test for this grade from Class Tests, or switch to All classes.'
+                      : 'Publish a class test from Class Tests first. Draft tests are managed on the Class Tests page.'
                   }
                 />
                 <div className="flex justify-center gap-3 pb-8">
@@ -396,17 +363,9 @@ export default function ResultsPage() {
               <div>
                 <h3 className="text-lg font-bold tracking-tight">Select a class test</h3>
                 <p className="text-sm text-muted-foreground">
-                  {statusTab === 'published'
-                    ? activeClassMeta
-                      ? `Published class tests for ${activeClassMeta.name} — view scores, ranks, and publish results.`
-                      : 'Published class tests — view scores, ranks, and publish results to students.'
-                    : statusTab === 'draft'
-                      ? activeClassMeta
-                        ? `Draft class tests for ${activeClassMeta.name} — finish setup and publish before students can take them.`
-                        : 'Draft class tests — finish setup and publish before students can take them.'
-                      : activeClassMeta
-                        ? `Class tests for ${activeClassMeta.name} — view scores, ranks, and publish results.`
-                        : 'Choose a test to view student scores, calculate ranks, and publish results.'}
+                  {activeClassMeta
+                    ? `Published class tests for ${activeClassMeta.name} — view scores, ranks, and publish results.`
+                    : 'Published class tests only — view student scores, calculate ranks, and publish results.'}
                 </p>
               </div>
               <div className="relative w-full max-w-sm">
@@ -465,8 +424,8 @@ export default function ResultsPage() {
                           <Award className="h-5 w-5" />
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
-                          <Badge variant={exam.status === 'PUBLISHED' || exam.status === 'COMPLETED' ? 'success' : 'secondary'}>
-                            {exam.status}
+                          <Badge variant="success">
+                            {exam.status === 'COMPLETED' ? 'COMPLETED' : 'PUBLISHED'}
                           </Badge>
                           {can(Permission.EXAM_DELETE) && (
                             <Button
@@ -474,16 +433,8 @@ export default function ResultsPage() {
                               size="icon"
                               variant="ghost"
                               className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              disabled={!canDeleteExam(exam)}
-                              title={
-                                !canDeleteExam(exam)
-                                  ? 'Cannot delete: exam is completed or students have taken it'
-                                  : 'Delete class test'
-                              }
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setDeleteTarget({ id: exam.id, title: exam.title, code: exam.code });
-                              }}
+                              title="Delete class test"
+                              onClick={(e) => void handleDeleteClick(exam, e)}
                             >
                               <Trash2 className="h-4 w-4" />
                             </Button>
@@ -492,7 +443,9 @@ export default function ResultsPage() {
                       </div>
 
                       <h4 className="mt-4 font-bold leading-snug line-clamp-2">{exam.title}</h4>
-                      <p className="mt-1 text-xs font-medium text-muted-foreground">{exam.code}</p>
+                      <p className="mt-1 text-xs font-medium text-muted-foreground">
+                        {classTestSubjectLabel(exam, subjectNameById)}
+                      </p>
 
                       {batch && (
                         <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-2.5 py-1 text-xs font-medium text-muted-foreground">
@@ -532,7 +485,7 @@ export default function ResultsPage() {
             <DialogHeader>
               <DialogTitle>Delete class test?</DialogTitle>
               <DialogDescription>
-                Permanently delete <span className="font-medium text-foreground">{deleteTarget?.title}</span> ({deleteTarget?.code}).
+                Permanently delete <span className="font-medium text-foreground">{deleteTarget?.title}</span>?
                 This removes all questions, results, and student assignments for this test.
               </DialogDescription>
             </DialogHeader>
@@ -568,9 +521,14 @@ export default function ResultsPage() {
           title={selectedMeta?.title ?? 'Results'}
           highlight={selectedMeta?.title?.split(/\s+/).slice(-2).join(' ')}
           description={
-            selectedMeta?.aiTestConfig?.batch
-              ? `${selectedMeta.code} · ${selectedMeta.aiTestConfig.batch.academicClass.name} · ${selectedMeta.aiTestConfig.batch.name}`
-              : selectedMeta?.code ?? 'Class test results'
+            selectedMeta
+              ? [
+                  classTestSubjectLabel(selectedMeta, subjectNameById),
+                  selectedMeta.aiTestConfig?.batch
+                    ? `${selectedMeta.aiTestConfig.batch.academicClass.name} · ${selectedMeta.aiTestConfig.batch.name}`
+                    : null,
+                ].filter(Boolean).join(' · ')
+              : 'Class test results'
           }
           badge="Results"
         >

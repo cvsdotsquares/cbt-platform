@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuthStore } from '@/stores/auth-store';
 import { tenantsApi } from '@/lib/api';
 import { applyTenantPrimaryColor } from '@/lib/tenant-branding';
+import { TENANT_BRANDING_ENABLED } from '@cbt/shared';
 
 type TenantBrandingData = {
   branding?: { primaryColor?: string };
@@ -25,7 +26,7 @@ export function TenantBranding() {
   const { data: tenant } = useQuery({
     queryKey: ['tenant-branding', tenantId],
     queryFn: () => tenantsApi.getMyBranding(accessToken!) as Promise<TenantBrandingData>,
-    enabled: !isPublicAuth && !!accessToken && !!tenantId && isAuthenticated,
+    enabled: TENANT_BRANDING_ENABLED && !isPublicAuth && !!accessToken && !!tenantId && isAuthenticated,
     staleTime: 5 * 60_000,
   });
 

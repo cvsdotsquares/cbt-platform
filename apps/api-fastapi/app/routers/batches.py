@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.feature_flags import SYLLABUS_MARK_PROGRESS_ENABLED
 from app.core.security import get_current_user
 from app.models.curriculum import (
     AcademicClass,
@@ -950,6 +951,11 @@ async def update_syllabus_progress(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if not SYLLABUS_MARK_PROGRESS_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Syllabus mark progress is temporarily disabled.",
+        )
     await _get_batch_or_404(db, batch_id, current_user.tenant_id)
     allowed_subject_ids = await _teacher_allowed_subject_ids(db, current_user, batch_id)
     if allowed_subject_ids is not None:

@@ -1,10 +1,14 @@
+/** Institute Admin role is disabled in the product — users keep staff access but use the teacher portal. */
+export const INSTITUTE_ADMIN_ENABLED = false;
+
 const STAFF_ROLES = [
   'SUPER_ADMIN', 'ORG_ADMIN', 'INSTITUTE_ADMIN', 'TEACHER',
   'EXAM_MANAGER', 'QUESTION_MODERATOR', 'PROCTOR', 'EVALUATOR', 'AUDITOR',
 ];
 
 const ELEVATED_STAFF_ROLES = [
-  'SUPER_ADMIN', 'ORG_ADMIN', 'INSTITUTE_ADMIN', 'EXAM_MANAGER',
+  'SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_MANAGER',
+  ...(INSTITUTE_ADMIN_ENABLED ? (['INSTITUTE_ADMIN'] as const) : []),
 ];
 
 export function normalizeRoles(roles: unknown): string[] {
@@ -20,10 +24,13 @@ export function isAdmin(roles: unknown) {
   return normalized.some((role) => STAFF_ROLES.includes(role));
 }
 
-/** Pure teacher — TEACHER without elevated admin roles. Uses the simplified teacher portal. */
+/** Pure teacher portal — TEACHER (or disabled Institute Admin) without elevated admin roles. */
 export function isTeacherOnly(roles: unknown) {
   const normalized = normalizeRoles(roles);
-  return normalized.includes('TEACHER') && !normalized.some((role) => ELEVATED_STAFF_ROLES.includes(role));
+  if (normalized.some((role) => ELEVATED_STAFF_ROLES.includes(role))) return false;
+  if (normalized.includes('TEACHER')) return true;
+  if (!INSTITUTE_ADMIN_ENABLED && normalized.includes('INSTITUTE_ADMIN')) return true;
+  return false;
 }
 
 /** Pure candidate/student — has CANDIDATE or STUDENT role and no staff roles. */

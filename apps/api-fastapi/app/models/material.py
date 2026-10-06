@@ -29,7 +29,7 @@ MaterialStatusEnum = ENUM(
 )
 
 if TYPE_CHECKING:
-    from app.models.curriculum import AcademicClass, Book, Chapter, Subject, SyllabusTopic
+    from app.models.curriculum import AcademicClass, Batch, Book, Chapter, Subject, SyllabusTopic
 
 
 class StudyMaterial(Base):
@@ -38,6 +38,7 @@ class StudyMaterial(Base):
     id: Mapped[str] = mapped_column(UuidStr, primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id: Mapped[str] = mapped_column(UuidStr, nullable=False)
     academic_class_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("academic_classes.id"), nullable=True)
+    batch_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("batches.id"), nullable=True)
     subject_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("subjects.id"), nullable=True)
     book_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("books.id"), nullable=True)
     chapter_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("chapters.id"), nullable=True)
@@ -60,6 +61,7 @@ class StudyMaterial(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     academic_class: Mapped["AcademicClass | None"] = relationship("AcademicClass", lazy="selectin")
+    batch: Mapped["Batch | None"] = relationship("Batch", lazy="selectin")
     subject: Mapped["Subject | None"] = relationship("Subject", lazy="selectin")
     chapter: Mapped["Chapter | None"] = relationship("Chapter", lazy="selectin")
     topic: Mapped["SyllabusTopic | None"] = relationship("SyllabusTopic", lazy="selectin")

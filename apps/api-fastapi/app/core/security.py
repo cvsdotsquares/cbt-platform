@@ -139,23 +139,6 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "analytics:view", "analytics:export", "audit:read", "audit:export",
         "curriculum:read", "batch:read", "syllabus:read", "material:read", "learning:read",
     ],
-    "INSTITUTE_ADMIN": [
-        "user:create", "user:read", "user:update", "user:delete", "user:assign_role",
-        "session:manage", "mfa:manage",
-        "tenant:read", "tenant:update", "tenant:branding", "tenant:security_config",
-        "candidate:create", "candidate:invite", "candidate:read", "candidate:update", "candidate:delete",
-        "candidate:bulk_import",
-        "question:create", "question:read", "question:update", "question:delete",
-        "question:approve", "question:import", "question:export", "question:version",
-        "exam:create", "exam:read", "exam:update", "exam:delete", "exam:publish",
-        "exam:schedule", "exam:assign_candidates", "exam:template", "exam:view_response",
-        "result:evaluate", "result:publish", "result:read", "result:rank", "result:cutoff", "result:certificate",
-        "analytics:view", "analytics:export", "audit:read",
-        "proctoring:monitor", "security:view_violations",
-        "curriculum:manage", "curriculum:read", "batch:manage", "batch:read",
-        "syllabus:manage", "syllabus:read", "material:upload", "material:read", "material:delete",
-        "ai:generate_test", "learning:read", "learning:manage",
-    ],
     "TEACHER": [
         "candidate:invite", "candidate:read", "candidate:update", "curriculum:read", "batch:read",
         "syllabus:manage", "syllabus:read", "question:read", "question:update",
@@ -175,6 +158,9 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
 }
 
 # Add lowercase aliases and common synonyms
+# Institute Admin disabled — same API access as Teacher until re-enabled.
+ROLE_PERMISSIONS["INSTITUTE_ADMIN"] = list(ROLE_PERMISSIONS["TEACHER"])
+
 ROLE_PERMISSIONS["ADMIN"] = ROLE_PERMISSIONS["ORG_ADMIN"]
 
 ROLE_PERMISSIONS["USER"] = [

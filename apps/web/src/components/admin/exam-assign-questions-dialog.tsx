@@ -98,7 +98,7 @@ export function ExamAssignQuestionsDialog({
           variant: 'success',
         });
       } else {
-        toast({ title: 'No new questions added', description: 'Selected questions are already on this exam', variant: 'destructive' });
+        toast({ title: 'No new questions added.', description: 'Selected questions are already on this exam.', variant: 'destructive' });
       }
       onOpenChange(false);
     },

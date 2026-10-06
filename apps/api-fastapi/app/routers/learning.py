@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
+from app.models.curriculum import Chapter
+from app.services.chapter_titles import resolve_chapter_title
 
 router = APIRouter(prefix="/learning", tags=["Learning"])
 
@@ -78,7 +80,7 @@ async def student_dashboard(
             text(
                 """
                 SELECT sp.status, c.id AS chapter_id, c.number, c.title,
-                       s.id AS subject_id, s.name AS subject_name
+                       s.id AS subject_id, s.name AS subject_name, s.code AS subject_code
                 FROM syllabus_progress sp
                 JOIN chapters c ON c.id = sp.chapter_id
                 JOIN books bk ON bk.id = c.book_id
@@ -94,14 +96,25 @@ async def student_dashboard(
         chapters = []
         seen: set[str] = set()
         by_subject: dict[str, dict] = {}
+        class_level = int(enrollment["level"])
         for row in progress.mappings():
             if row["chapter_id"] in seen:
                 continue
             seen.add(row["chapter_id"])
+            resolved_title = resolve_chapter_title(
+                row["title"],
+                chapter_number=int(row["number"]),
+                class_level=class_level,
+                subject_code=row.get("subject_code"),
+            )
+            if resolved_title != (row["title"] or "").strip():
+                chapter_row = await db.get(Chapter, row["chapter_id"])
+                if chapter_row:
+                    chapter_row.title = resolved_title[:200]
             chapter = {
                 "id": row["chapter_id"],
                 "number": row["number"],
-                "title": row["title"],
+                "title": resolved_title,
                 "status": row["status"],
                 "subject": {"id": row["subject_id"], "name": row["subject_name"]},
             }
@@ -113,6 +126,8 @@ async def student_dashboard(
                     "chapters": [],
                 }
             by_subject[sid]["chapters"].append(chapter)
+
+        await db.flush()
 
         syllabus_coverage.append(
             {

@@ -60,11 +60,51 @@ function reducer(state: State, action: Action): State {
   }
 }
 
+function withFullStop(text: string | undefined, apply: boolean): string | undefined {
+  if (!apply || text == null || text === '') return text;
+  const trimmed = text.trimEnd();
+  if (!trimmed || /[.!?…]$/.test(trimmed)) return text;
+  return `${trimmed}.`;
+}
+
+function isErrorToastTitle(title?: string): boolean {
+  if (!title) return false;
+  const t = title.toLowerCase();
+  return (
+    t.startsWith('could not') ||
+    t.startsWith('cannot ') ||
+    t.includes(' failed') ||
+    t.startsWith('failed') ||
+    t.startsWith('unable ') ||
+    t.startsWith('error') ||
+    t.startsWith('upload failed') ||
+    t.startsWith('save failed') ||
+    t.startsWith('delete failed') ||
+    t.startsWith('cleanup failed') ||
+    t.startsWith('action failed') ||
+    t.startsWith('remove failed') ||
+    t.startsWith('update failed') ||
+    t.startsWith('copy failed') ||
+    t.startsWith('export failed') ||
+    t.startsWith('publish failed') ||
+    t.startsWith('re-index failed') ||
+    t.startsWith('intervention failed') ||
+    t.startsWith('generation failed') ||
+    t.startsWith('rank calculation failed')
+  );
+}
+
 function toast({ title, description, variant }: Omit<ToasterToast, 'id'>) {
+  const infoLike = variant === 'default' || variant === undefined;
+  const successLike = variant === 'success';
+  const warningLike = variant === 'destructive' && !isErrorToastTitle(title);
+  const punctuate = infoLike || successLike || warningLike;
+  const finalTitle = withFullStop(title, punctuate);
+  const finalDescription = withFullStop(description, punctuate);
   const id = genId();
   dispatch({
     type: 'ADD_TOAST',
-    toast: { id, title, description, variant, open: true },
+    toast: { id, title: finalTitle, description: finalDescription, variant, open: true },
   });
   const timeout = setTimeout(() => {
     dispatch({ type: 'DISMISS_TOAST', toastId: id });

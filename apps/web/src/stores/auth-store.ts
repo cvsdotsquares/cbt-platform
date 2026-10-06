@@ -1,11 +1,12 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { AuthUser } from '@cbt/shared';
-import { Permission, getPermissionsForRoles } from '@cbt/shared';
-import { normalizeRoles, isAdmin, isTeacherOnly } from '@/lib/roles';
+import { normalizeRoles } from '@/lib/roles';
 import { syncAuthSession, hydrateAuthSession, clearAuthSession } from '@/lib/auth-session';
+import { getAuthPersistStorage, setRememberMePreference } from '@/lib/auth-storage';
 import { clearMaterialsUploadSession } from '@/lib/materials-upload-session';
-import { getDefaultDashboardPath } from '@/lib/dashboard-nav';
+import { getQueryClient } from '@/lib/query-client';
+import { useNotificationStore } from '@/stores/notification-store';
 
 interface AuthState {
   user: AuthUser | null;
@@ -14,7 +15,12 @@ interface AuthState {
   isAuthenticated: boolean;
   _hasHydrated: boolean;
   setHasHydrated: (value: boolean) => void;
-  setAuth: (user: AuthUser, accessToken: string, refreshToken: string) => Promise<boolean>;
+  setAuth: (
+    user: AuthUser,
+    accessToken: string,
+    refreshToken: string,
+    options?: { rememberMe?: boolean },
+  ) => Promise<boolean>;
   updateTokens: (accessToken: string, refreshToken: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -28,10 +34,14 @@ export const useAuthStore = create<AuthState>()(
       isAuthenticated: false,
       _hasHydrated: false,
       setHasHydrated: (value) => set({ _hasHydrated: value }),
-      setAuth: async (user, accessToken, refreshToken) => {
+      setAuth: async (user, accessToken, refreshToken, options) => {
         clearMaterialsUploadSession();
+        useNotificationStore.getState().clear();
+        getQueryClient().removeQueries({ queryKey: ['dashboard'] });
+        const rememberMe = options?.rememberMe ?? false;
+        setRememberMePreference(rememberMe);
         const roles = normalizeRoles(user.roles);
-        const isAdminUser = await syncAuthSession(accessToken, refreshToken);
+        const isAdminUser = await syncAuthSession(accessToken, refreshToken, rememberMe);
         set({
           user: { ...user, roles: roles as AuthUser['roles'] },
           accessToken,
@@ -46,6 +56,7 @@ export const useAuthStore = create<AuthState>()(
       },
       logout: async () => {
         clearMaterialsUploadSession();
+        useNotificationStore.getState().clear();
         const { accessToken } = useAuthStore.getState();
         await clearAuthSession(accessToken);
         set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
@@ -53,7 +64,7 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: 'cbt-auth',
-      storage: createJSONStorage(() => sessionStorage),
+      storage: createJSONStorage(getAuthPersistStorage),
       partialize: (state) => ({
         user: state.user,
         accessToken: state.accessToken,
@@ -91,12 +102,3 @@ export async function syncSessionFromStore() {
   return false;
 }
 
-export function getPostLoginPath(roles: unknown) {
-  const normalized = normalizeRoles(roles);
-  if (isTeacherOnly(normalized)) {
-    const permissions = getPermissionsForRoles(normalized as never);
-    const can = (p: Permission | string) => permissions.includes(p as never);
-    return getDefaultDashboardPath(can, normalized);
-  }
-  return isAdmin(normalized) ? '/dashboard' : '/my-exams';
-}

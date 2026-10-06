@@ -51,7 +51,7 @@ export function CreateUserDialog({ accessToken, roles }: CreateUserDialogProps) 
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] });
-      toast({ title: 'User created', variant: 'success' });
+      toast({ title: 'Teacher created', variant: 'success' });
       setOpen(false);
       setForm({ ...EMPTY_FORM });
     },
@@ -61,12 +61,12 @@ export function CreateUserDialog({ accessToken, roles }: CreateUserDialogProps) 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button><Plus className="mr-2 h-4 w-4" /> Add User</Button>
+        <Button><Plus className="mr-2 h-4 w-4" /> Add Teacher</Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Create User</DialogTitle>
-          <DialogDescription>Add a new staff user to your organization.</DialogDescription>
+          <DialogTitle>Add Teacher</DialogTitle>
+          <DialogDescription>Create a teacher account for your institute.</DialogDescription>
         </DialogHeader>
         {/* Remount + non-login autocomplete tokens stop the browser from injecting saved credentials */}
         <form
@@ -138,7 +138,7 @@ export function CreateUserDialog({ accessToken, roles }: CreateUserDialogProps) 
               type="submit"
               disabled={createMutation.isPending || !form.email || !form.password || !form.firstName}
             >
-              {createMutation.isPending ? 'Creating...' : 'Create User'}
+              {createMutation.isPending ? 'Creating…' : 'Create teacher'}
             </Button>
           </DialogFooter>
         </form>

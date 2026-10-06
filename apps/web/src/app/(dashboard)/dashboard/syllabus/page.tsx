@@ -1,23 +1,28 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import {
+  MATERIALS_INDEX_POLL_MS,
+  materialsNeedLivePoll,
+} from '@/lib/materials-indexing-poll';
+import { useMaterialIndexingSync } from '@/hooks/use-material-indexing-sync';
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { PageHeader } from '@/components/layout/page-header';
-import { HorizontalTabScroller, ScrollableListPanel } from '@/components/layout/horizontal-tab-scroller';
-import { StatCard } from '@/components/layout/stat-card';
+import { HorizontalTabScroller } from '@/components/layout/horizontal-tab-scroller';
 import { EmptyState } from '@/components/layout/data-table';
 import { curriculumApi, materialsApi } from '@/lib/api';
 import { useRequireAuth } from '@/hooks/use-auth';
 import { TableSkeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { displayChapterTitle } from '@/lib/chapter-title';
 import { toast } from '@/hooks/use-toast';
 import {
-  BookOpen, ChevronDown, ChevronRight, Upload, Layers, GraduationCap,
-  Library, Sparkles, Hash, FileText, Eye, Download, Loader2, Trash2,
+  BookOpen, ChevronDown, ChevronRight, Upload, GraduationCap,
+  Library, Sparkles, Eye, Download, Loader2, Trash2,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
 import { isTeacherOnly, normalizeRoles } from '@/lib/roles';
@@ -50,19 +55,48 @@ type MaterialItem = {
 
 const NCERT_LEVELS = [9, 10, 11, 12] as const;
 
-const SUBJECT_ACCENTS: Record<string, string> = {
-  MATH: 'from-blue-500/15 to-indigo-500/5 text-blue-600 border-blue-500/20',
-  SCI: 'from-emerald-500/15 to-teal-500/5 text-emerald-600 border-emerald-500/20',
-  SST: 'from-amber-500/15 to-orange-500/5 text-amber-700 border-amber-500/20',
-  ENG: 'from-violet-500/15 to-purple-500/5 text-violet-600 border-violet-500/20',
-  PHY: 'from-sky-500/15 to-cyan-500/5 text-sky-600 border-sky-500/20',
-  CHEM: 'from-rose-500/15 to-pink-500/5 text-rose-600 border-rose-500/20',
-  BIO: 'from-lime-500/15 to-green-500/5 text-lime-700 border-lime-500/20',
+/** Idle subject row — tints for light mode; translucent tints in dark (avoid white boxes + invisible badge text). */
+const SUBJECT_IDLE_ICON: Record<string, string> = {
+  MATH: 'border-0 bg-[#EEF2FF] text-[#4F46E5] dark:bg-indigo-500/20 dark:text-indigo-300',
+  SCI: 'border-0 bg-[#ECFDF5] text-[#059669] dark:bg-emerald-500/20 dark:text-emerald-300',
+  SST: 'border-0 bg-[#FFF7ED] text-[#C2410C] dark:bg-orange-500/20 dark:text-orange-300',
+  ENG: 'border-0 bg-[#F3EDF7] text-[#7D49AF] dark:bg-violet-500/20 dark:text-violet-300',
+  PHY: 'border-0 bg-[#F0F9FF] text-[#0284C7] dark:bg-sky-500/20 dark:text-sky-300',
+  CHEM: 'border-0 bg-[#FFF1F2] text-[#E11D48] dark:bg-rose-500/20 dark:text-rose-300',
+  BIO: 'border-0 bg-[#F7FEE7] text-[#65A30D] dark:bg-lime-500/20 dark:text-lime-300',
 };
 
-function subjectAccent(code: string) {
-  return SUBJECT_ACCENTS[code] ?? 'from-primary/10 to-primary/5 text-primary border-primary/20';
+const SUBJECT_IDLE_BADGE: Record<string, string> = {
+  MATH: 'border-0 bg-[#E0E7FF] text-[#4F46E5] dark:bg-indigo-500/25 dark:text-indigo-200',
+  SCI: 'border-0 bg-[#D1FAE5] text-[#059669] dark:bg-emerald-500/25 dark:text-emerald-200',
+  SST: 'border-0 bg-[#FFEDD5] text-[#C2410C] dark:bg-orange-500/25 dark:text-orange-200',
+  ENG: 'border-0 bg-[#FCEFE8] text-[#7D49AF] dark:bg-violet-500/25 dark:text-violet-200',
+  PHY: 'border-0 bg-[#E0F2FE] text-[#0284C7] dark:bg-sky-500/25 dark:text-sky-200',
+  CHEM: 'border-0 bg-[#FFE4E6] text-[#E11D48] dark:bg-rose-500/25 dark:text-rose-200',
+  BIO: 'border-0 bg-[#ECFCCB] text-[#65A30D] dark:bg-lime-500/25 dark:text-lime-200',
+};
+
+function subjectIdleIcon(code: string) {
+  return SUBJECT_IDLE_ICON[code] ?? 'border-0 bg-primary/10 text-primary dark:bg-primary/20 dark:text-primary-foreground';
 }
+
+function subjectIdleBadge(code: string) {
+  return SUBJECT_IDLE_BADGE[code] ?? 'border-0 bg-primary/10 text-primary dark:bg-primary/25 dark:text-primary-foreground';
+}
+
+/** Subject tiles — flat until expanded */
+const SYLLABUS_SUBJECT_TILE =
+  'border-border/50 bg-[#FFFDF8] shadow-none dark:bg-card';
+
+const SYLLABUS_SUBJECT_TILE_OPEN =
+  'relative z-10 -translate-y-1 scale-[1.008] border-border/60 shadow-[0_14px_32px_-10px_rgba(15,23,42,0.22)] dark:shadow-card-hover';
+
+const SYLLABUS_TILE_MOTION =
+  'transition-[transform,box-shadow,border-color] duration-300 ease-out motion-reduce:transition-none motion-reduce:transform-none';
+
+/** Selected uploaded book row — elevated only when clicked */
+const SYLLABUS_BOOK_ELEVATED =
+  'relative z-[1] -translate-y-0.5 scale-[1.008] border-border/60 shadow-[0_10px_24px_-10px_rgba(15,23,42,0.18)] ring-1 ring-black/[0.04] dark:shadow-card-hover dark:ring-white/10';
 
 function chapterCount(subject: Subject) {
   return subject.books.reduce((sum, b) => sum + b.chapters.length, 0);
@@ -81,6 +115,13 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const SYLLABUS_INNER_PANEL =
+  'rounded-sm border border-border/60 bg-muted/20 p-4 shadow-sm dark:bg-muted/10';
+
+/** Uploaded book row (matches batch syllabus book headers) */
+const SYLLABUS_BOOK_ROW =
+  'rounded-xl border border-border/50 bg-[#FFFDF8] shadow-none dark:bg-card';
+
 export default function SyllabusPage() {
   const { accessToken } = useRequireAuth(true);
   const queryClient = useQueryClient();
@@ -89,14 +130,31 @@ export default function SyllabusPage() {
   const teacherPortal = isTeacherOnly(normalizeRoles(user?.roles));
   const [selectedLevel, setSelectedLevel] = useState<number | null>(null);
   const [expandedSubjects, setExpandedSubjects] = useState<Set<string>>(new Set());
-  const [expandedChapters, setExpandedChapters] = useState<Set<string>>(new Set());
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
   const canDeleteMaterial = can(Permission.MATERIAL_DELETE);
+
+  const { data: materials } = useQuery({
+    queryKey: ['materials'],
+    queryFn: () => materialsApi.list(accessToken!) as Promise<MaterialItem[]>,
+    enabled: !!accessToken,
+    staleTime: 0,
+    refetchInterval: (query) =>
+      materialsNeedLivePoll(query.state.data as MaterialItem[] | undefined)
+        ? MATERIALS_INDEX_POLL_MS
+        : false,
+  });
+
+  useMaterialIndexingSync(queryClient, materials);
+
+  const materialsPollActive = materialsNeedLivePoll(materials);
 
   const { data: uploadClasses, isLoading: uploadsLoading } = useQuery({
     queryKey: ['curriculum-from-uploads'],
     queryFn: () => curriculumApi.getClasses(accessToken!, { uploadedOnly: true, includeTopics: true }) as Promise<AcademicClass[]>,
     enabled: !!accessToken,
+    staleTime: 0,
+    refetchInterval: materialsPollActive ? MATERIALS_INDEX_POLL_MS : false,
   });
 
   const { data: allClasses, isLoading: allClassesLoading } = useQuery({
@@ -106,12 +164,6 @@ export default function SyllabusPage() {
   });
 
   const isLoading = uploadsLoading || allClassesLoading;
-
-  const { data: materials } = useQuery({
-    queryKey: ['materials'],
-    queryFn: () => materialsApi.list(accessToken!) as Promise<MaterialItem[]>,
-    enabled: !!accessToken,
-  });
 
   const classTabs = useMemo(() => {
     const byLevel = new Map<number, AcademicClass>();
@@ -189,34 +241,16 @@ export default function SyllabusPage() {
   const activeLevel = selectedLevel ?? tabClasses[0]?.level ?? NCERT_LEVELS[0];
   const activeClass = mergedClassView(activeLevel);
 
-  const totals = useMemo(() => {
-    const views = NCERT_LEVELS.map((level) => mergedClassView(level)).filter(Boolean) as AcademicClass[];
-    const subjects = views.reduce((n, c) => n + c.subjects.length, 0);
-    const chapters = views.reduce(
-      (n, c) => n + c.subjects.reduce((s, sub) => s + chapterCount(sub), 0),
-      0,
-    );
-    const topics = views.reduce(
-      (n, c) => n + c.subjects.reduce((s, sub) => s + topicCount(sub), 0),
-      0,
-    );
-    return { classes: views.length, subjects, chapters, topics };
-  }, [uploadClasses, allClasses, materials]);
-
   function toggleSubject(id: string) {
     setExpandedSubjects((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  function toggleChapter(id: string) {
-    setExpandedChapters((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+        setSelectedBookId(null);
+      } else {
+        next.add(id);
+        setSelectedBookId(null);
+      }
       return next;
     });
   }
@@ -228,7 +262,6 @@ export default function SyllabusPage() {
 
   function collapseAll() {
     setExpandedSubjects(new Set());
-    setExpandedChapters(new Set());
   }
 
   const reconcileMutation = useMutation({
@@ -310,19 +343,7 @@ export default function SyllabusPage() {
             </Button>
           </>
         )}
-        <Button size="sm" asChild>
-          <Link href="/dashboard/batches">
-            <GraduationCap className="mr-2 h-4 w-4" /> Mark progress
-          </Link>
-        </Button>
       </PageHeader>
-
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-        <StatCard title="Classes covered" value={totals.classes} icon={GraduationCap} accent="blue" />
-        <StatCard title="Subjects" value={totals.subjects} icon={Library} accent="violet" />
-        <StatCard title="Chapters" value={totals.chapters} icon={BookOpen} accent="green" />
-        <StatCard title="Topics" value={totals.topics} icon={Layers} accent="amber" />
-      </div>
 
       {isLoading ? (
         <TableSkeleton rows={4} cols={1} />
@@ -357,9 +378,6 @@ export default function SyllabusPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <HorizontalTabScroller>
               {tabClasses.map((cls) => {
-                const view = mergedClassView(cls.level);
-                const chapters = view?.subjects.reduce((n, s) => n + chapterCount(s), 0) ?? 0;
-                const bookCount = materialsForClassLevel(cls.level).length;
                 const active = cls.level === activeLevel;
                 return (
                   <button
@@ -368,22 +386,16 @@ export default function SyllabusPage() {
                     onClick={() => {
                       setSelectedLevel(cls.level);
                       setExpandedSubjects(new Set());
-                      setExpandedChapters(new Set());
+                      setSelectedBookId(null);
                     }}
                     className={cn(
-                      'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                      'inline-flex shrink-0 items-center rounded-full border px-4 py-2 text-sm font-semibold transition-all',
                       active
                         ? 'border-primary bg-primary text-primary-foreground shadow-sm'
                         : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
                     )}
                   >
                     {cls.name}
-                    <span className={cn(
-                      'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
-                      active ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
-                    )}>
-                      {chapters || bookCount}
-                    </span>
                   </button>
                 );
               })}
@@ -427,34 +439,45 @@ export default function SyllabusPage() {
                     : [];
                   const topics = subjectBooks.length ? topicCount(subject) : 0;
                   const open = expandedSubjects.has(subject.id);
-                  const accent = subjectAccent(subject.code);
 
                   return (
                     <Card
                       key={subject.id}
                       className={cn(
-                        'surface-card mb-4 break-inside-avoid overflow-hidden transition-shadow',
-                        open && 'ring-1 ring-primary/20 shadow-md',
+                        'mb-4 break-inside-avoid overflow-hidden rounded-xl border shadow-none',
+                        SYLLABUS_TILE_MOTION,
+                        SYLLABUS_SUBJECT_TILE,
+                        open && SYLLABUS_SUBJECT_TILE_OPEN,
                       )}
                     >
                       <button
                         type="button"
-                        className="w-full text-left"
+                        className="w-full rounded-t-xl text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
                         onClick={() => toggleSubject(subject.id)}
                       >
-                        <CardHeader className="pb-4">
+                        <CardHeader className={cn('pb-4', open && 'pb-3')}>
                           <div className="flex items-start justify-between gap-3">
                             <div className="flex items-start gap-3">
                               <div className={cn(
-                                'flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border bg-gradient-to-br',
-                                accent,
+                                'flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-colors duration-200',
+                                subjectIdleIcon(subject.code),
                               )}>
                                 <BookOpen className="h-5 w-5" />
                               </div>
                               <div>
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <Badge variant="outline" className="font-mono text-[10px]">{subject.code}</Badge>
-                                  <CardTitle className="text-base">{subject.name}</CardTitle>
+                                  <Badge
+                                    variant="default"
+                                    className={cn(
+                                      'font-mono text-[10px] normal-case tracking-normal transition-colors duration-200',
+                                      subjectIdleBadge(subject.code),
+                                    )}
+                                  >
+                                    {subject.code}
+                                  </Badge>
+                                  <CardTitle className="text-base">
+                                    {subject.name}
+                                  </CardTitle>
                                 </div>
                                 <p className="mt-1.5 text-xs text-muted-foreground">
                                   {chapters.length} chapter{chapters.length === 1 ? '' : 's'}
@@ -475,151 +498,107 @@ export default function SyllabusPage() {
                       </button>
 
                       {open && (
-                        <CardContent className="space-y-4 border-t border-border/60 pt-4">
-                          {/* Uploaded books for this subject */}
-                          <div className="space-y-2">
+                        <CardContent className="border-t border-border/50 px-6 pb-6 pt-4">
+                          <div className={SYLLABUS_INNER_PANEL}>
                             <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                              Uploaded books & Documents
+                              Uploaded books &amp; documents
                             </p>
                             {subjectBooks.length === 0 ? (
-                              <p className="rounded-xl border border-dashed border-border/60 px-3 py-3 text-center text-xs text-muted-foreground">
+                              <p className="mt-3 rounded-lg border border-dashed border-border/60 px-3 py-3 text-center text-xs text-muted-foreground">
                                 No books uploaded for this subject yet.
                               </p>
                             ) : (
-                              <ScrollableListPanel maxHeightClass="max-h-52" className="space-y-2">
-                              {subjectBooks.map((m) => (
-                                <div
-                                  key={m.id}
-                                  className="flex items-center gap-2 rounded-xl border border-border/50 bg-muted/20 px-3 py-2.5"
-                                >
-                                  <FileText className="h-4 w-4 shrink-0 text-primary" />
-                                  <div className="min-w-0 flex-1">
-                                    <p className="truncate text-sm font-medium">{m.title}</p>
-                                    <p className="truncate text-[11px] text-muted-foreground">
-                                      {m.chapter
-                                        ? `Ch.${m.chapter.number} ${m.chapter.title}`
-                                        : 'Complete book'}
-                                      {' · '}{formatFileSize(m.fileSize)}
-                                    </p>
-                                  </div>
-                                  <Button
-                                    size="icon"
-                                    variant="ghost"
-                                    className="h-8 w-8 shrink-0"
-                                    title="View"
-                                    disabled={openingId === m.id}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void viewMaterial(m.id);
-                                    }}
-                                  >
-                                    {openingId === m.id
-                                      ? <Loader2 className="h-4 w-4 animate-spin" />
-                                      : <Eye className="h-4 w-4" />}
-                                  </Button>
-                                  <Button
-                                    size="icon"
-                                    variant="ghost"
-                                    className="h-8 w-8 shrink-0"
-                                    title="Download"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void materialsApi.downloadFile(accessToken!, m.id, m.fileName);
-                                    }}
-                                  >
-                                    <Download className="h-4 w-4" />
-                                  </Button>
-                                  {canDeleteMaterial && (
-                                    <Button
-                                      size="icon"
-                                      variant="ghost"
-                                      className="h-8 w-8 shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                                      title="Delete book"
-                                      disabled={deleteMaterialMutation.isPending && deleteMaterialMutation.variables === m.id}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (!window.confirm(`Delete "${m.title}"? This removes indexed chapters for this book.`)) return;
-                                        deleteMaterialMutation.mutate(m.id);
-                                      }}
-                                    >
-                                      {deleteMaterialMutation.isPending && deleteMaterialMutation.variables === m.id
-                                        ? <Loader2 className="h-4 w-4 animate-spin" />
-                                        : <Trash2 className="h-4 w-4" />}
-                                    </Button>
-                                  )}
-                                </div>
-                              ))}
-                              </ScrollableListPanel>
-                            )}
-                          </div>
-
-                          <div className="space-y-2">
-                            <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                              Chapters & topics
-                            </p>
-                            {subjectBooks.length === 0 ? (
-                              <p className="py-2 text-center text-sm text-muted-foreground">
-                                Upload a book for this subject to see extracted chapters here.
-                              </p>
-                            ) : chapters.length === 0 ? (
-                              <p className="py-2 text-center text-sm text-muted-foreground">
-                                Indexing in progress — chapters will appear when the book is ready.
-                              </p>
-                            ) : (
-                              <ScrollableListPanel maxHeightClass="max-h-64" className="space-y-2">
-                              {chapters
-                                .slice()
-                                .sort((a, b) => a.number - b.number)
-                                .map((ch) => {
-                                  const chOpen = expandedChapters.has(ch.id);
-                                  const hasTopics = ch.topics.length > 0;
+                              <div className="mt-3 flex flex-col gap-2">
+                                {subjectBooks.map((m) => {
+                                  const bookSelected = selectedBookId === m.id;
+                                  const bookMeta = m.chapter
+                                    ? `Ch.${m.chapter.number} ${displayChapterTitle(m.chapter.title)}`
+                                    : 'Complete book';
                                   return (
-                                    <div
-                                      key={ch.id}
-                                      className="rounded-xl border border-border/50 bg-muted/20 transition-colors hover:bg-muted/40"
+                                  <div
+                                    key={m.id}
+                                    className={cn(
+                                      'flex items-center gap-1 px-3 py-2 sm:px-4',
+                                      SYLLABUS_TILE_MOTION,
+                                      SYLLABUS_BOOK_ROW,
+                                      bookSelected && SYLLABUS_BOOK_ELEVATED,
+                                    )}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="min-w-0 flex-1 rounded-lg py-1.5 pl-1 pr-2 text-left"
+                                      onClick={() => setSelectedBookId(m.id)}
                                     >
-                                      <button
-                                        type="button"
-                                        className="flex w-full items-start gap-3 px-3.5 py-3 text-left"
-                                        onClick={() => hasTopics && toggleChapter(ch.id)}
-                                        disabled={!hasTopics}
+                                      <span className="block truncate text-base font-semibold">
+                                        {m.title}
+                                      </span>
+                                      <span className="block truncate text-xs text-muted-foreground">
+                                        {bookMeta}
+                                        {' · '}
+                                        {formatFileSize(m.fileSize)}
+                                      </span>
+                                    </button>
+                                    <div className="flex shrink-0 items-center gap-0.5">
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8 shrink-0 text-muted-foreground"
+                                        title="View"
+                                        disabled={openingId === m.id}
+                                        onClick={() => {
+                                          setSelectedBookId(m.id);
+                                          void viewMaterial(m.id);
+                                        }}
                                       >
-                                        <span className="mt-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded-md bg-background px-1.5 font-mono text-[11px] font-bold text-primary shadow-sm">
-                                          {ch.number}
-                                        </span>
-                                        <div className="min-w-0 flex-1">
-                                          <p className="text-sm font-semibold leading-snug">{ch.title}</p>
-                                          {hasTopics && (
-                                            <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
-                                              <Hash className="h-3 w-3" />
-                                              {ch.topics.length} topic{ch.topics.length === 1 ? '' : 's'}
-                                            </p>
-                                          )}
-                                        </div>
-                                        {hasTopics && (
-                                          chOpen
-                                            ? <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                                            : <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                                        )}
-                                      </button>
-
-                                      {chOpen && hasTopics && (
-                                        <ul className="space-y-1 border-t border-border/40 px-3.5 py-2.5">
-                                          {ch.topics.map((t) => (
-                                            <li
-                                              key={t.id}
-                                              className="flex items-start gap-2 rounded-lg px-2 py-1.5 text-xs text-muted-foreground"
-                                            >
-                                              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/50" />
-                                              <span>{t.title}</span>
-                                            </li>
-                                          ))}
-                                        </ul>
+                                        {openingId === m.id
+                                          ? <Loader2 className="h-4 w-4 animate-spin" />
+                                          : <Eye className="h-4 w-4" />}
+                                      </Button>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8 shrink-0 text-muted-foreground"
+                                        title="Download"
+                                        onClick={() => {
+                                          setSelectedBookId(m.id);
+                                          void materialsApi.downloadFile(accessToken!, m.id, m.fileName);
+                                        }}
+                                      >
+                                        <Download className="h-4 w-4" />
+                                      </Button>
+                                      {canDeleteMaterial && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8 shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                                          title="Delete book"
+                                          disabled={
+                                            deleteMaterialMutation.isPending
+                                            && deleteMaterialMutation.variables === m.id
+                                          }
+                                          onClick={() => {
+                                            setSelectedBookId(m.id);
+                                            if (
+                                              !window.confirm(
+                                                `Delete "${m.title}"? This removes indexed chapters for this book.`,
+                                              )
+                                            ) {
+                                              return;
+                                            }
+                                            deleteMaterialMutation.mutate(m.id);
+                                          }}
+                                        >
+                                          {deleteMaterialMutation.isPending
+                                          && deleteMaterialMutation.variables === m.id
+                                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                                            : <Trash2 className="h-4 w-4" />}
+                                        </Button>
                                       )}
                                     </div>
+                                  </div>
                                   );
                                 })}
-                              </ScrollableListPanel>
+                              </div>
                             )}
                           </div>
                         </CardContent>

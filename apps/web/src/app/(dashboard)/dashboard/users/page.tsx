@@ -147,9 +147,8 @@ export default function UsersPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Staff & Teachers"
-        highlight="Teachers"
-        description="Manage staff accounts, roles, and teacher class/subject assignments"
+        title="Teachers"
+        description="Manage teacher accounts and class/subject assignments"
         badge={data ? `${items.length} on page` : 'Institute team'}
       >
         {can(Permission.USER_CREATE) && (
@@ -187,7 +186,7 @@ export default function UsersPage() {
               <Input
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search staff & teachers..."
+                placeholder="Search teachers..."
                 className="pl-9"
               />
             </div>

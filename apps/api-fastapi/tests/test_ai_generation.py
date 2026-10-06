@@ -9,6 +9,8 @@ from app.routers.ai import (
     _generate_questions,
     _is_placeholder_reference_answer,
     _normalize_msq_answer_value,
+    _options_reuse_previous,
+    _options_unchanged,
     _resolve_chapter_ids,
     _try_accept_ai_question_candidate,
 )
@@ -247,3 +249,23 @@ async def test_resolve_chapter_ids_does_not_fall_back_to_every_upload(monkeypatc
 
     assert exc.value.status_code == 400
     assert "Done" in str(exc.value.detail)
+
+
+def test_options_unchanged_compares_normalized_option_sets():
+    previous = {"a": "2", "b": "3", "c": "1", "d": "0"}
+    same_order = {"a": "2", "b": "3", "c": "1", "d": "0"}
+    permuted = {"a": "3", "b": "0", "c": "2", "d": "1"}
+    one_new = {"a": "2", "b": "3", "c": "1", "d": "5"}
+
+    assert _options_unchanged(previous, same_order)
+    assert _options_unchanged(previous, permuted)
+    assert not _options_unchanged(previous, one_new)
+
+
+def test_options_reuse_previous_detects_any_shared_text():
+    previous = {"a": "2", "b": "3", "c": "1", "d": "0"}
+    overlaps = {"a": "4", "b": "3", "c": "6", "d": "7"}
+    disjoint = {"a": "4", "b": "5", "c": "6", "d": "7"}
+
+    assert _options_reuse_previous(previous, overlaps)
+    assert not _options_reuse_previous(previous, disjoint)

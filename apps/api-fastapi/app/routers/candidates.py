@@ -42,29 +42,54 @@ async def candidate_stats(
     current_user: User = Depends(get_current_user),
 ):
     tenant_id = current_user.tenant_id
+    teacher_scoped = is_teacher_scoped(current_user)
+    teacher_batch_ids: list[str] | None = None
+    if teacher_scoped:
+        teacher_batch_ids = await get_teacher_batch_ids(db, str(current_user.id))
+        if not teacher_batch_ids:
+            return {
+                "total": 0,
+                "verified": 0,
+                "pending": 0,
+                "rejected": 0,
+                "unassigned": 0,
+                "byClass": [],
+            }
+
+    scope_filter = ""
+    params: dict = {"tenant_id": tenant_id}
+    if teacher_batch_ids:
+        params["teacher_batch_ids"] = teacher_batch_ids
+        scope_filter = """
+              AND EXISTS (
+                SELECT 1 FROM batch_enrollments be
+                WHERE be.candidate_id = c.id AND be.batch_id::text = ANY(:teacher_batch_ids)
+              )
+        """
+
     rows = await db.execute(
         text(
-            """
+            f"""
             SELECT kyc_status, COUNT(*) AS count
-            FROM candidates
-            WHERE tenant_id = :tenant_id
+            FROM candidates c
+            WHERE c.tenant_id = :tenant_id{scope_filter}
             GROUP BY kyc_status
             """
         ),
-        {"tenant_id": tenant_id},
+        params,
     )
     counts = {row["kyc_status"]: int(row["count"]) for row in rows.mappings()}
     total = sum(counts.values())
 
     by_class_rows = await db.execute(
         text(
-            """
+            f"""
             SELECT ac.id AS academic_class_id, ac.level, COUNT(*)::int AS count
             FROM (
               SELECT DISTINCT ON (be.candidate_id) be.candidate_id, be.batch_id
               FROM batch_enrollments be
               INNER JOIN candidates c ON c.id = be.candidate_id
-              WHERE c.tenant_id = :tenant_id
+              WHERE c.tenant_id = :tenant_id{scope_filter}
               ORDER BY be.candidate_id, be.enrolled_at ASC
             ) pe
             INNER JOIN batches b ON b.id = pe.batch_id
@@ -72,20 +97,20 @@ async def candidate_stats(
             GROUP BY ac.id, ac.level
             """
         ),
-        {"tenant_id": tenant_id},
+        params,
     )
     unassigned_row = await db.execute(
         text(
-            """
+            f"""
             SELECT COUNT(*)::int AS count
             FROM candidates c
-            WHERE c.tenant_id = :tenant_id
+            WHERE c.tenant_id = :tenant_id{scope_filter}
               AND NOT EXISTS (
                 SELECT 1 FROM batch_enrollments be WHERE be.candidate_id = c.id
               )
             """
         ),
-        {"tenant_id": tenant_id},
+        params,
     )
 
     return {
@@ -288,8 +313,12 @@ class CandidateCreate(BaseModel):
     password: str
     first_name: str = Field(alias="firstName")
     last_name: str = Field(alias="lastName")
+    gender: str
+    student_mobile: str = Field(alias="studentMobile")
+    guardian_name: str = Field(alias="guardianName")
+    guardian_phone: str = Field(alias="guardianPhone")
     registration_number: str | None = Field(None, alias="registrationNumber")
-    batch_id: str | None = Field(None, alias="batchId")
+    batch_id: str = Field(alias="batchId")
     roll_number: str | None = Field(None, alias="rollNumber")
 
 
@@ -331,6 +360,13 @@ class KycSubmitBody(BaseModel):
 
     file_name: str = Field(..., alias="fileName")
     file_data: str = Field(..., alias="fileData")
+
+
+def _guardian_from_profile(profile_data: dict | None) -> dict[str, str | None]:
+    profile = profile_data if isinstance(profile_data, dict) else {}
+    guardian_name = str(profile.get("guardianName") or "").strip() or None
+    guardian_phone = str(profile.get("guardianPhone") or "").strip() or None
+    return {"guardianName": guardian_name, "guardianPhone": guardian_phone}
 
 
 def _kyc_document_summary(profile_data: dict) -> dict | None:
@@ -617,9 +653,9 @@ async def list_candidates(
     rows = await db.execute(
         text(
             f"""
-            SELECT c.id, c.registration_number, c.kyc_status,
+            SELECT c.id, c.registration_number, c.kyc_status, c.gender,
                    u.id AS user_id, u.email, u.first_name, u.last_name, u.status AS user_status,
-                   u.created_at, c.profile_data
+                   u.phone, u.created_at, c.profile_data
             FROM candidates c
             JOIN users u ON u.id = c.user_id
             WHERE {where_sql}
@@ -674,18 +710,23 @@ async def list_candidates(
                 profile = {}
         profile = profile if isinstance(profile, dict) else {}
         submitted_at = str(profile.get("submittedAt") or "").strip() or None
+        guardian = _guardian_from_profile(profile)
         items.append(
             {
                 "id": row["id"],
                 "registrationNumber": row["registration_number"],
+                "gender": row["gender"],
                 "kycStatus": row["kyc_status"],
                 "kycSubmittedAt": submitted_at if row["kyc_status"] != "NOT_SUBMITTED" else None,
                 "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
                 "createdBy": profile.get("createdBy"),
+                "guardianName": guardian["guardianName"],
+                "guardianPhone": guardian["guardianPhone"],
                 "user": {
                     "firstName": row["first_name"] or "",
                     "lastName": row["last_name"] or "",
                     "email": row["email"],
+                    "phone": row["phone"],
                     "status": row["user_status"],
                 },
                 "batchEnrollments": batch_enrollments,
@@ -805,6 +846,23 @@ async def create_candidate(
 ):
     tenant_id = current_user.tenant_id
     email = body.email.strip().lower()
+    gender = body.gender.strip()
+    student_mobile = body.student_mobile.strip()
+    guardian_name = body.guardian_name.strip()
+    guardian_phone = body.guardian_phone.strip()
+
+    if not body.first_name.strip() or not body.last_name.strip():
+        raise HTTPException(status_code=400, detail="First and last name are required")
+    if not gender:
+        raise HTTPException(status_code=400, detail="Gender is required")
+    if not student_mobile:
+        raise HTTPException(status_code=400, detail="Student mobile number is required")
+    if not guardian_name:
+        raise HTTPException(status_code=400, detail="Parent / guardian name is required")
+    if not guardian_phone:
+        raise HTTPException(status_code=400, detail="Parent / guardian mobile number is required")
+    if not body.batch_id:
+        raise HTTPException(status_code=400, detail="Class batch is required")
 
     existing = await db.execute(
         select(User.id).where(User.email == email, User.tenant_id == tenant_id)
@@ -825,15 +883,14 @@ async def create_candidate(
     if dup_reg.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Registration number already exists")
 
-    if body.batch_id:
-        batch_check = await db.execute(
-            text(
-                "SELECT id FROM batches WHERE id = :id AND tenant_id = :tenant_id AND is_active = true"
-            ),
-            {"id": body.batch_id, "tenant_id": tenant_id},
-        )
-        if not batch_check.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="Batch not found")
+    batch_check = await db.execute(
+        text(
+            "SELECT id FROM batches WHERE id = :id AND tenant_id = :tenant_id AND is_active = true"
+        ),
+        {"id": body.batch_id, "tenant_id": tenant_id},
+    )
+    if not batch_check.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Batch not found")
 
     now = datetime.now(timezone.utc)
     user_id = str(uuid.uuid4())
@@ -843,8 +900,9 @@ async def create_candidate(
         id=user_id,
         email=email,
         password_hash=hash_password(body.password),
-        first_name=body.first_name,
-        last_name=body.last_name,
+        first_name=body.first_name.strip(),
+        last_name=body.last_name.strip(),
+        phone=student_mobile,
         status=UserStatus.ACTIVE,
         is_active=True,
         tenant_id=tenant_id,
@@ -867,9 +925,9 @@ async def create_candidate(
         text(
             """
             INSERT INTO candidates
-                            (id, tenant_id, user_id, registration_number, kyc_status, profile_data, created_at, updated_at)
+                            (id, tenant_id, user_id, registration_number, gender, kyc_status, profile_data, created_at, updated_at)
             VALUES
-                            (:id, :tenant_id, :user_id, :reg_no, 'NOT_SUBMITTED', CAST(:profile_data AS jsonb), :now, :now)
+                            (:id, :tenant_id, :user_id, :reg_no, :gender, 'NOT_SUBMITTED', CAST(:profile_data AS jsonb), :now, :now)
             """
         ),
         {
@@ -877,35 +935,37 @@ async def create_candidate(
             "tenant_id": tenant_id,
             "user_id": user_id,
             "reg_no": reg_no,
+            "gender": gender,
             "profile_data": json.dumps({
                 "createdBy": {
                     "id": str(current_user.id),
                     "name": f"{current_user.first_name or ''} {current_user.last_name or ''}".strip() or current_user.email,
                     "email": current_user.email,
-                }
+                },
+                "guardianName": guardian_name,
+                "guardianPhone": guardian_phone,
             }),
             "now": now,
         },
     )
 
-    if body.batch_id:
-        await db.execute(
-            text(
-                """
-                INSERT INTO batch_enrollments (id, batch_id, candidate_id, roll_number, roll_locked, enrolled_at)
-                VALUES (:id, :batch_id, :candidate_id, :roll_number, :roll_locked, :now)
-                """
-            ),
-            {
-                "id": str(uuid.uuid4()),
-                "batch_id": body.batch_id,
-                "candidate_id": candidate_id,
-                "roll_number": (body.roll_number or "").strip() or None,
-                "roll_locked": bool((body.roll_number or "").strip()),
-                "now": now,
-            },
-        )
-        await sync_batch_roll_numbers(db, body.batch_id)
+    await db.execute(
+        text(
+            """
+            INSERT INTO batch_enrollments (id, batch_id, candidate_id, roll_number, roll_locked, enrolled_at)
+            VALUES (:id, :batch_id, :candidate_id, :roll_number, :roll_locked, :now)
+            """
+        ),
+        {
+            "id": str(uuid.uuid4()),
+            "batch_id": body.batch_id,
+            "candidate_id": candidate_id,
+            "roll_number": (body.roll_number or "").strip() or None,
+            "roll_locked": bool((body.roll_number or "").strip()),
+            "now": now,
+        },
+    )
+    await sync_batch_roll_numbers(db, body.batch_id)
 
     return {
         "id": user_id,
@@ -922,7 +982,7 @@ async def _build_candidate_kyc_detail(
     result = await db.execute(
         text(
             """
-            SELECT c.id, c.registration_number, c.kyc_status, c.profile_data,
+            SELECT c.id, c.registration_number, c.kyc_status, c.gender, c.profile_data,
                    u.email, u.first_name, u.last_name, u.phone
             FROM candidates c
             JOIN users u ON u.id = c.user_id
@@ -966,10 +1026,14 @@ async def _build_candidate_kyc_detail(
         for d in doc_rows.mappings()
     ]
 
+    guardian = _guardian_from_profile(profile_data)
     return {
         "id": str(row["id"]),
         "registrationNumber": row["registration_number"],
+        "gender": row["gender"],
         "kycStatus": row["kyc_status"],
+        "guardianName": guardian["guardianName"],
+        "guardianPhone": guardian["guardianPhone"],
         "profileData": profile_data,
         "user": {
             "email": row["email"],

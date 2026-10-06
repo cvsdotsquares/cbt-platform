@@ -10,6 +10,7 @@ import {
 import { batchesApi, examsApi, type ExamDetail } from '@/lib/api';
 import { toast } from '@/hooks/use-toast';
 import { GraduationCap, Loader2 } from 'lucide-react';
+import { EXAM_STUDENT_ADD_BLOCKED_MESSAGE, hasExamStarted } from '@/lib/exam-window';
 
 interface ExamAssignCandidatesDialogProps {
   accessToken: string;
@@ -103,6 +104,17 @@ export function ExamAssignCandidatesDialog({
     [visibleStudents],
   );
 
+  const initialRegistered = useMemo(
+    () => new Set(
+      (exam?.registrations ?? [])
+        .map((r) => r.candidateId ?? r.candidate?.id)
+        .filter(Boolean) as string[],
+    ),
+    [exam?.registrations],
+  );
+
+  const examStarted = hasExamStarted(exam?.startTime);
+
   useEffect(() => {
     if (!open) {
       setSelected(new Set());
@@ -118,13 +130,34 @@ export function ExamAssignCandidatesDialog({
   const toggle = (id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+        return next;
+      }
+      if (examStarted && !initialRegistered.has(id)) {
+        toast({
+          title: 'Cannot add student',
+          description: EXAM_STUDENT_ADD_BLOCKED_MESSAGE,
+          variant: 'destructive',
+        });
+        return prev;
+      }
+      next.add(id);
       return next;
     });
   };
 
-  const selectAll = () => setSelected(new Set(visibleStudents.filter((s) => !s.notInBatch).map((s) => s.candidateId)));
+  const selectAll = () => {
+    if (examStarted) {
+      toast({
+        title: 'Cannot add students',
+        description: EXAM_STUDENT_ADD_BLOCKED_MESSAGE,
+        variant: 'destructive',
+      });
+      return;
+    }
+    setSelected(new Set(visibleStudents.filter((s) => !s.notInBatch).map((s) => s.candidateId)));
+  };
   const selectNone = () => setSelected(new Set());
 
   const saveMutation = useMutation({
@@ -170,11 +203,20 @@ export function ExamAssignCandidatesDialog({
           </div>
         )}
 
+        {examStarted && (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            This class test has started. You can uncheck students to remove them (if they have not begun),
+            but you cannot add anyone new.
+          </p>
+        )}
+
         {visibleStudents.length > 0 && (
           <div className="flex gap-2 text-xs">
-            <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={selectAll}>
-              Select all
-            </Button>
+            {!examStarted && (
+              <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={selectAll}>
+                Select all
+              </Button>
+            )}
             <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={selectNone}>
               Select none
             </Button>
@@ -205,14 +247,19 @@ export function ExamAssignCandidatesDialog({
               No students in {linkedBatch.name}. Enroll students on Classes &amp; Batches first.
             </p>
           )}
-          {!loading && visibleStudents.map((s) => (
+          {!loading && visibleStudents.map((s) => {
+            const addBlocked = examStarted && !initialRegistered.has(s.candidateId) && !selected.has(s.candidateId);
+            return (
             <label
               key={s.candidateId}
-              className="flex cursor-pointer items-center gap-3 rounded-lg border p-3 hover:bg-muted/50 has-[:checked]:border-primary/50 has-[:checked]:bg-primary/5"
+              className={`flex items-center gap-3 rounded-lg border p-3 has-[:checked]:border-primary/50 has-[:checked]:bg-primary/5 ${
+                addBlocked ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:bg-muted/50'
+              }`}
             >
               <input
                 type="checkbox"
                 checked={selected.has(s.candidateId)}
+                disabled={addBlocked}
                 onChange={() => toggle(s.candidateId)}
               />
               <div className="min-w-0 flex-1">
@@ -224,7 +271,8 @@ export function ExamAssignCandidatesDialog({
                 </p>
               </div>
             </label>
-          ))}
+            );
+          })}
         </div>
 
         <DialogFooter>
@@ -233,8 +281,18 @@ export function ExamAssignCandidatesDialog({
               const blocked = visibleStudents.filter((s) => s.notInBatch && selected.has(s.candidateId));
               if (blocked.length) {
                 toast({
-                  title: 'Cannot save with students outside the batch',
+                  title: 'Cannot save with students outside the batch.',
                   description: 'Uncheck students marked “Not in batch”, or re-enroll them in this batch first.',
+                  variant: 'destructive',
+                });
+                return;
+              }
+              const addingAfterStart = examStarted
+                && [...selected].some((id) => !initialRegistered.has(id));
+              if (addingAfterStart) {
+                toast({
+                  title: 'Cannot add student',
+                  description: EXAM_STUDENT_ADD_BLOCKED_MESSAGE,
                   variant: 'destructive',
                 });
                 return;

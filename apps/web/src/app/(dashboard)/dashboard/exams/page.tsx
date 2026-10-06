@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
@@ -32,10 +32,20 @@ import {
   utcIsoToLocalDateTimeInput,
   validateExamSchedule,
 } from '@cbt/shared';
-import { EXAM_TIMEZONE_OPTIONS, formatExamTimeRange } from '@/lib/exam-dates';
-import { FileText, Users, Clock, HelpCircle, GraduationCap, Search } from 'lucide-react';
+import { formatExamTimeRange } from '@/lib/exam-dates';
+import { FileText, Users, Clock, HelpCircle, GraduationCap, Search, Filter, X } from 'lucide-react';
 import { TableSkeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { buildSubjectNameLookup, classTestSubjectLabel } from '@/lib/class-test-subject-label';
+import {
+  CLASS_TEST_DELETE_BLOCKED_TITLE,
+  classTestDeleteBlockedReason,
+} from '@/lib/class-test-delete';
+import {
+  classTestAssignedStudentCount,
+  classTestAttemptedStudentCount,
+  formatClassTestStudentAttemptSummary,
+} from '@/lib/class-test-student-counts';
 
 type ExamItem = ExamListItem;
 
@@ -44,10 +54,23 @@ function questionCount(exam: ExamItem) {
 }
 
 type ClassTab = 'all' | string;
+type StatusTab = 'all' | 'published' | 'draft';
 
 function examClassId(exam: ExamItem): string | undefined {
   return exam.aiTestConfig?.batch?.academicClass?.id;
 }
+
+function isPublishedExamStatus(status: ExamItem['status']) {
+  return status === 'PUBLISHED' || status === 'COMPLETED';
+}
+
+function examSubjectId(exam: ExamItem): string | undefined {
+  const id = exam.settings?.subjectId ?? exam.aiTestConfig?.subjectId;
+  return typeof id === 'string' && id ? id : undefined;
+}
+
+const EXAM_FILTER_FIELD =
+  'flex h-10 w-full rounded-lg border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
 export default function ExamsPage() {
   const searchParams = useSearchParams();
@@ -62,6 +85,11 @@ export default function ExamsPage() {
   const [scheduleAlert, setScheduleAlert] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [classTab, setClassTab] = useState<ClassTab>('all');
+  const [statusTab, setStatusTab] = useState<StatusTab>('all');
+  const [batchFilter, setBatchFilter] = useState('');
+  const [subjectFilter, setSubjectFilter] = useState('');
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const filterPanelRef = useRef<HTMLDivElement>(null);
   const [scheduleForm, setScheduleForm] = useState(() => {
     const defaults = getDefaultExamScheduleValues(DEFAULT_EXAM_TIMEZONE, 30, new Date());
     return {
@@ -70,7 +98,6 @@ export default function ExamsPage() {
       timezone: defaults.timezone,
       durationMinutes: defaults.durationMinutes,
       passingScore: 40,
-      maxAttempts: 1,
     };
   });
 
@@ -82,7 +109,10 @@ export default function ExamsPage() {
 
   const { data: classes } = useQuery({
     queryKey: ['curriculum-classes'],
-    queryFn: () => curriculumApi.getClasses(accessToken!) as Promise<{ id: string; level: number; name: string }[]>,
+    queryFn: () => curriculumApi.getClasses(accessToken!) as Promise<{
+      id: string; level: number; name: string;
+      subjects: { id: string; name: string }[];
+    }[]>,
     enabled: !!accessToken,
   });
 
@@ -90,6 +120,24 @@ export default function ExamsPage() {
     () => [...(classes ?? [])].sort((a, b) => a.level - b.level),
     [classes],
   );
+
+  const subjectNameById = useMemo(() => buildSubjectNameLookup(classes ?? []), [classes]);
+
+  useEffect(() => {
+    setBatchFilter('');
+    setSubjectFilter('');
+  }, [classTab]);
+
+  useEffect(() => {
+    if (!filterPanelOpen) return;
+    function onPointerDown(event: MouseEvent) {
+      if (!filterPanelRef.current?.contains(event.target as Node)) {
+        setFilterPanelOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [filterPanelOpen]);
 
   useEffect(() => {
     if (!highlightExamId) return;
@@ -223,19 +271,23 @@ export default function ExamsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['exams'] });
       setDeleteTarget(null);
-      toast({ title: 'Class test deleted', variant: 'success' });
+      toast({ title: 'Class test deleted.', variant: 'success' });
     },
-    onError: (e: Error) => toast({ title: 'Cannot delete exam', description: e.message, variant: 'destructive' }),
+    onError: (e: Error) => toast({
+      title: CLASS_TEST_DELETE_BLOCKED_TITLE,
+      description: e.message,
+      variant: 'destructive',
+    }),
   });
 
   const scheduleMutation = useMutation({
     mutationFn: () => examsApi.updateSchedule(accessToken!, scheduleTarget!.id, {
-      startTime: localDateTimeToUtcIso(scheduleForm.startTime, scheduleForm.timezone),
-      endTime: localDateTimeToUtcIso(scheduleForm.endTime, scheduleForm.timezone),
-      timezone: scheduleForm.timezone,
+      startTime: localDateTimeToUtcIso(scheduleForm.startTime, DEFAULT_EXAM_TIMEZONE),
+      endTime: localDateTimeToUtcIso(scheduleForm.endTime, DEFAULT_EXAM_TIMEZONE),
+      timezone: DEFAULT_EXAM_TIMEZONE,
       durationMinutes: scheduleForm.durationMinutes,
       passingScore: scheduleForm.passingScore,
-      maxAttempts: scheduleForm.maxAttempts,
+      maxAttempts: 1,
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['exams'] });
@@ -254,8 +306,7 @@ export default function ExamsPage() {
       ? exam.settings.durationMinutes
       : 30;
     const passingScore = typeof exam.settings?.passingScore === 'number' ? exam.settings.passingScore : 40;
-    const maxAttempts = typeof exam.settings?.maxAttempts === 'number' ? exam.settings.maxAttempts : 1;
-    const tz = exam.timezone || DEFAULT_EXAM_TIMEZONE;
+    const tz = DEFAULT_EXAM_TIMEZONE;
     const defaults = getDefaultExamScheduleValues(tz, duration, new Date());
     const startMs = exam.startTime ? new Date(exam.startTime).getTime() : NaN;
     const keepExistingStart = Number.isFinite(startMs) && startMs > Date.now() + 60_000;
@@ -268,7 +319,6 @@ export default function ExamsPage() {
       timezone: tz,
       durationMinutes: duration,
       passingScore,
-      maxAttempts,
     });
     setScheduleTarget(exam);
   }
@@ -314,11 +364,29 @@ export default function ExamsPage() {
     scheduleMutation.mutate();
   }
 
-  function canDeleteExam(exam: ExamItem) {
-    if (exam.status === 'COMPLETED') return false;
-    if ((exam._count?.sessions ?? 0) > 0) return false;
-    if ((exam._count?.results ?? 0) > 0) return false;
-    return true;
+  async function handleDeleteClick(exam: ExamItem) {
+    let latest: ExamItem = exam;
+    if (accessToken) {
+      try {
+        const fresh = await queryClient.fetchQuery({
+          queryKey: ['exams'],
+          queryFn: () => examsApi.list(accessToken!),
+        });
+        latest = (fresh?.items ?? []).find((e) => e.id === exam.id) ?? exam;
+      } catch {
+        /* use list row */
+      }
+    }
+    const reason = classTestDeleteBlockedReason(latest);
+    if (reason) {
+      toast({
+        title: CLASS_TEST_DELETE_BLOCKED_TITLE,
+        description: reason,
+        variant: 'destructive',
+      });
+      return;
+    }
+    setDeleteTarget({ id: exam.id, title: exam.title, code: exam.code });
   }
 
   const items = useMemo(
@@ -335,10 +403,68 @@ export default function ExamsPage() {
     return byClass;
   }, [items]);
 
-  const itemsForTab = useMemo(() => {
+  const itemsForClass = useMemo(() => {
     if (classTab === 'all') return items;
     return items.filter((exam) => examClassId(exam) === classTab);
   }, [items, classTab]);
+
+  const batchesForFilter = useMemo(() => {
+    const byId = new Map<string, NonNullable<NonNullable<ExamItem['aiTestConfig']>['batch']>>();
+    for (const exam of itemsForClass) {
+      const batch = exam.aiTestConfig?.batch;
+      if (batch?.id) byId.set(batch.id, batch);
+    }
+    return [...byId.values()].sort((a, b) => {
+      const levelDiff = a.academicClass.level - b.academicClass.level;
+      if (levelDiff !== 0) return levelDiff;
+      return a.name.localeCompare(b.name);
+    });
+  }, [itemsForClass]);
+
+  const subjectsForFilter = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const exam of itemsForClass) {
+      const id = examSubjectId(exam);
+      if (!id) continue;
+      const name = subjectNameById.get(id) ?? classTestSubjectLabel(exam, subjectNameById);
+      byId.set(id, name);
+    }
+    return [...byId.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [itemsForClass, subjectNameById]);
+
+  const scopeFiltersActive = Boolean(batchFilter || subjectFilter);
+
+  const itemsAfterScopeFilters = useMemo(() => {
+    let list = itemsForClass;
+    if (batchFilter) {
+      list = list.filter((exam) => exam.aiTestConfig?.batch?.id === batchFilter);
+    }
+    if (subjectFilter) {
+      list = list.filter((exam) => examSubjectId(exam) === subjectFilter);
+    }
+    return list;
+  }, [itemsForClass, batchFilter, subjectFilter]);
+
+  const publishedTestCount = useMemo(
+    () => itemsAfterScopeFilters.filter((e) => isPublishedExamStatus(e.status)).length,
+    [itemsAfterScopeFilters],
+  );
+  const draftTestCount = useMemo(
+    () => itemsAfterScopeFilters.filter((e) => e.status === 'DRAFT').length,
+    [itemsAfterScopeFilters],
+  );
+
+  const itemsForTab = useMemo(() => {
+    if (statusTab === 'published') {
+      return itemsAfterScopeFilters.filter((e) => isPublishedExamStatus(e.status));
+    }
+    if (statusTab === 'draft') {
+      return itemsAfterScopeFilters.filter((e) => e.status === 'DRAFT');
+    }
+    return itemsAfterScopeFilters;
+  }, [itemsAfterScopeFilters, statusTab]);
 
   const activeClassMeta = classTab !== 'all' ? sortedClasses.find((c) => c.id === classTab) : undefined;
 
@@ -349,10 +475,11 @@ export default function ExamsPage() {
     return itemsForTab.filter((exam) => {
       const batch = exam.aiTestConfig?.batch;
       const batchText = [batch?.name, batch?.academicClass?.name].filter(Boolean).join(' ');
-      const haystack = [exam.title, exam.code, batchText].join(' ').toLowerCase();
+      const subjectLabel = classTestSubjectLabel(exam, subjectNameById);
+      const haystack = [exam.title, subjectLabel, batchText].join(' ').toLowerCase();
       return haystack.includes(query);
     });
-  }, [itemsForTab, searchTerm]);
+  }, [itemsForTab, searchTerm, subjectNameById]);
 
   if (isLoading) return <TableSkeleton rows={3} cols={1} />;
 
@@ -366,7 +493,7 @@ export default function ExamsPage() {
       />
 
       <div className="space-y-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:gap-3">
           <HorizontalTabScroller className="min-w-0 flex-1">
             <button
               type="button"
@@ -416,21 +543,159 @@ export default function ExamsPage() {
               );
             })}
           </HorizontalTabScroller>
-          <div className="relative w-full max-w-sm sm:w-auto sm:flex-1 sm:max-w-sm">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search class tests..."
-              className="pl-9"
-            />
+
+          <div ref={filterPanelRef} className="relative shrink-0 lg:mx-1">
+            <button
+              type="button"
+              aria-expanded={filterPanelOpen}
+              aria-haspopup="dialog"
+              onClick={() => setFilterPanelOpen((open) => !open)}
+              className={cn(
+                'inline-flex w-full items-center justify-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all sm:w-auto',
+                filterPanelOpen || scopeFiltersActive
+                  ? 'border-primary bg-primary/10 text-foreground shadow-sm'
+                  : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+              )}
+            >
+              <Filter className="h-4 w-4 shrink-0" />
+              Filter
+              {scopeFiltersActive && (
+                <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-bold text-primary-foreground">
+                  {[batchFilter, subjectFilter].filter(Boolean).length}
+                </span>
+              )}
+            </button>
+            {filterPanelOpen && (
+              <div
+                role="dialog"
+                aria-label="Class test filters"
+                className="absolute left-0 top-full z-50 mt-2 w-[min(calc(100vw-2rem),18rem)] rounded-xl border border-border/60 bg-card p-4 text-foreground shadow-lg sm:left-1/2 sm:-translate-x-1/2 lg:left-0 lg:translate-x-0"
+              >
+                <div className="mb-3 flex items-start justify-between gap-2">
+                  <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                    Filter tests
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 shrink-0 text-muted-foreground"
+                    aria-label="Close filters"
+                    onClick={() => setFilterPanelOpen(false)}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">Batch</Label>
+                    <select
+                      className={EXAM_FILTER_FIELD}
+                      value={batchFilter}
+                      onChange={(e) => setBatchFilter(e.target.value)}
+                    >
+                      <option value="">All batches</option>
+                      {batchesForFilter.map((batch) => (
+                        <option key={batch.id} value={batch.id}>
+                          {batch.academicClass.name} · {batch.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">Subject</Label>
+                    <select
+                      className={EXAM_FILTER_FIELD}
+                      value={subjectFilter}
+                      onChange={(e) => setSubjectFilter(e.target.value)}
+                    >
+                      <option value="">All subjects</option>
+                      {subjectsForFilter.map((subject) => (
+                        <option key={subject.id} value={subject.id}>
+                          {subject.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {scopeFiltersActive && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => {
+                        setBatchFilter('');
+                        setSubjectFilter('');
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex w-full flex-col gap-2 lg:ml-auto lg:w-auto lg:flex-row lg:items-center lg:gap-2">
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={() => setStatusTab((s) => (s === 'published' ? 'all' : 'published'))}
+                className={cn(
+                  'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                  statusTab === 'published'
+                    ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                    : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+                )}
+              >
+                Published
+                {publishedTestCount > 0 && (
+                  <span className={cn(
+                    'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                    statusTab === 'published' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                  )}>
+                    {publishedTestCount}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusTab((s) => (s === 'draft' ? 'all' : 'draft'))}
+                className={cn(
+                  'inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-all',
+                  statusTab === 'draft'
+                    ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                    : 'border-border/60 bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground',
+                )}
+              >
+                Draft
+                {draftTestCount > 0 && (
+                  <span className={cn(
+                    'rounded-full px-1.5 py-0.5 text-[10px] font-bold',
+                    statusTab === 'draft' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+                  )}>
+                    {draftTestCount}
+                  </span>
+                )}
+              </button>
+            </div>
+            <div className="relative w-full max-w-sm sm:w-auto sm:min-w-[12rem] sm:max-w-sm">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search class tests..."
+                className="pl-9"
+              />
+            </div>
           </div>
         </div>
 
         <ScrollableListPanel maxHeightClass="max-h-[min(70vh,720px)]" className="space-y-4">
         {filteredItems.map((exam) => {
           const qCount = questionCount(exam);
-          const cCount = exam._count?.registrations ?? 0;
+          const cCount = classTestAssignedStudentCount(exam);
+          const attemptedCount = classTestAttemptedStudentCount(exam);
           const batch = exam.aiTestConfig?.batch;
           const readyToPublish = qCount > 0 && cCount > 0;
 
@@ -459,10 +724,17 @@ export default function ExamsPage() {
                         </Badge>
                       )}
                     </div>
-                    <p className="mt-1 text-sm text-muted-foreground">{exam.code}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {classTestSubjectLabel(exam, subjectNameById)}
+                    </p>
                     <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
                       <span className="flex items-center gap-1"><HelpCircle className="h-3 w-3" />{qCount} question{qCount === 1 ? '' : 's'}</span>
-                      <span className="flex items-center gap-1"><Users className="h-3 w-3" />{cCount} student{cCount === 1 ? '' : 's'}</span>
+                      <span className="flex items-center gap-1" title={formatClassTestStudentAttemptSummary(exam)}>
+                        <Users className="h-3 w-3" />
+                        {cCount > 0
+                          ? `${attemptedCount}/${cCount} attempted`
+                          : 'No students assigned'}
+                      </span>
                       <span className="flex items-center gap-1">
                         <Clock className="h-3 w-3" />
                         {formatExamTimeRange(exam.startTime, exam.endTime, exam.timezone || DEFAULT_EXAM_TIMEZONE)}
@@ -485,40 +757,32 @@ export default function ExamsPage() {
                       Edit Schedule
                     </Button>
                   )}
-                  {exam.status === 'DRAFT' && (
-                    <>
-                      {can(Permission.EXAM_ASSIGN_CANDIDATES) && batch && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setCandidatesDialog({ examId: exam.id, title: exam.title })}
-                      >
-                        Students ({cCount})
-                      </Button>
-                      )}
-                      {can(Permission.EXAM_PUBLISH) && (
-                      <Button
-                        size="sm"
-                        onClick={() => publishMutation.mutate(exam.id)}
-                        disabled={!readyToPublish || publishMutation.isPending}
-                      >
-                        Publish
-                      </Button>
-                      )}
-                    </>
+                  {exam.status === 'DRAFT' && can(Permission.EXAM_PUBLISH) && (
+                    <Button
+                      size="sm"
+                      onClick={() => publishMutation.mutate(exam.id)}
+                      disabled={!readyToPublish || publishMutation.isPending}
+                    >
+                      Publish
+                    </Button>
+                  )}
+                  {can(Permission.EXAM_ASSIGN_CANDIDATES) && batch
+                    && (exam.status === 'DRAFT' || exam.status === 'PUBLISHED' || exam.status === 'SCHEDULED') && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setCandidatesDialog({ examId: exam.id, title: exam.title })}
+                    >
+                      Students ({cCount}{attemptedCount > 0 ? ` · ${attemptedCount} attempted` : ''})
+                    </Button>
                   )}
                   {can(Permission.EXAM_DELETE) && (
                     <Button
                       size="sm"
                       variant="outline"
                       className="text-destructive hover:text-destructive"
-                      disabled={!canDeleteExam(exam)}
-                      title={
-                        !canDeleteExam(exam)
-                          ? 'Cannot delete: exam is completed or students have taken it'
-                          : 'Permanently delete this exam'
-                      }
-                      onClick={() => setDeleteTarget({ id: exam.id, title: exam.title, code: exam.code })}
+                      title="Permanently delete this class test"
+                      onClick={() => void handleDeleteClick(exam)}
                     >
                       Delete
                     </Button>
@@ -536,17 +800,25 @@ export default function ExamsPage() {
                 !items.length
                   ? 'No class tests yet'
                   : itemsForTab.length === 0
-                    ? activeClassMeta
-                      ? `No class tests for ${activeClassMeta.name}`
-                      : 'No class tests in this class'
+                    ? statusTab === 'published'
+                      ? 'No published class tests'
+                      : statusTab === 'draft'
+                        ? 'No draft class tests'
+                        : activeClassMeta
+                          ? `No class tests for ${activeClassMeta.name}`
+                          : 'No class tests in this class'
                     : 'No matching class tests'
               }
               description={
                 !items.length
                   ? 'Create a NCERT-aligned test from uploaded books — it will appear here for scheduling and publishing to your batch.'
                   : itemsForTab.length === 0
-                    ? 'Create a class test for this grade, or switch to All classes to see every test.'
-                    : 'Try a different class test name, code, or batch.'
+                    ? statusTab !== 'all'
+                      ? 'Clear the status filter or pick another class to see more tests.'
+                      : 'Create a class test for this grade, or switch to All classes to see every test.'
+                    : scopeFiltersActive
+                      ? 'Clear batch or subject filters, or try a different search.'
+                      : 'Try a different class test name, code, or batch.'
               }
             />
             <div className="flex flex-wrap justify-center gap-3 pb-8">
@@ -557,9 +829,27 @@ export default function ExamsPage() {
               )}
               {items.length > 0 && itemsForTab.length === 0 && (
                 <>
-                  <Button variant="outline" onClick={() => setClassTab('all')}>
-                    View all classes
-                  </Button>
+                  {scopeFiltersActive && (
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setBatchFilter('');
+                        setSubjectFilter('');
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  )}
+                  {statusTab !== 'all' && (
+                    <Button variant="outline" onClick={() => setStatusTab('all')}>
+                      Show all statuses
+                    </Button>
+                  )}
+                  {classTab !== 'all' && statusTab === 'all' && (
+                    <Button variant="outline" onClick={() => setClassTab('all')}>
+                      View all classes
+                    </Button>
+                  )}
                   <Button asChild>
                     <Link href="/dashboard/ai-tests">Create Class Test</Link>
                   </Button>
@@ -612,37 +902,20 @@ export default function ExamsPage() {
                 How long each student gets once they start the test.
               </p>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label>Pass score (%)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={scheduleForm.passingScore}
-                  onChange={(e) =>
-                    setScheduleForm((prev) => ({
-                      ...prev,
-                      passingScore: Math.min(100, Math.max(0, parseInt(e.target.value, 10) || 0)),
-                    }))
-                  }
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Max attempts</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={scheduleForm.maxAttempts}
-                  onChange={(e) =>
-                    setScheduleForm((prev) => ({
-                      ...prev,
-                      maxAttempts: Math.min(10, Math.max(1, parseInt(e.target.value, 10) || 1)),
-                    }))
-                  }
-                />
-              </div>
+            <div className="space-y-2">
+              <Label>Pass score (%)</Label>
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                value={scheduleForm.passingScore}
+                onChange={(e) =>
+                  setScheduleForm((prev) => ({
+                    ...prev,
+                    passingScore: Math.min(100, Math.max(0, parseInt(e.target.value, 10) || 0)),
+                  }))
+                }
+              />
             </div>
             <div className="space-y-2">
               <Label>Start Time</Label>
@@ -681,31 +954,8 @@ export default function ExamsPage() {
             </div>
             <div className="space-y-2">
               <Label>Timezone</Label>
-              <select
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                value={scheduleForm.timezone}
-                onChange={(e) => {
-                  const nextTimezone = e.target.value;
-                  setScheduleAlert(null);
-                  setScheduleForm((prev) => {
-                    if (!prev.startTime) return { ...prev, timezone: nextTimezone };
-
-                    const startUtc = localDateTimeToUtcIso(prev.startTime, prev.timezone);
-                    const endUtc = prev.endTime ? localDateTimeToUtcIso(prev.endTime, prev.timezone) : null;
-
-                    return {
-                      ...prev,
-                      timezone: nextTimezone,
-                      startTime: utcIsoToLocalDateTimeInput(startUtc, nextTimezone),
-                      endTime: endUtc ? utcIsoToLocalDateTimeInput(endUtc, nextTimezone) : prev.endTime,
-                    };
-                  });
-                }}
-              >
-                {EXAM_TIMEZONE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
+              <Input value="India (IST)" readOnly disabled className="bg-muted/40" />
+              <p className="text-xs text-muted-foreground">All class tests use Indian Standard Time.</p>
             </div>
             {(scheduleAlert || scheduleIssueMessage) && (
               <div
@@ -737,7 +987,7 @@ export default function ExamsPage() {
           <DialogHeader>
             <DialogTitle>Delete class test?</DialogTitle>
             <DialogDescription>
-              Permanently delete <span className="font-medium text-foreground">{deleteTarget?.title}</span> ({deleteTarget?.code}).
+              Permanently delete <span className="font-medium text-foreground">{deleteTarget?.title}</span>?
               This removes all questions and student assignments for this test.
             </DialogDescription>
           </DialogHeader>

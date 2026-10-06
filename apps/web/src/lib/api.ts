@@ -1,6 +1,7 @@
 import { useAuthStore } from '@/stores/auth-store';
 import { fetchWithColdStartRetry as fetchWithBackoff } from './cold-start-retry';
-import { isAdmin, isCandidate, normalizeRoles } from './roles';
+import { formatApiErrorPayload } from '@/lib/format-error-message';
+import { INSTITUTE_ADMIN_ENABLED, isAdmin, isCandidate, normalizeRoles } from './roles';
 import type { AuthUser } from '@cbt/shared';
 
 const RENDER_API_BASE =
@@ -186,9 +187,15 @@ export type ExamListItem = {
   startTime: string;
   endTime: string;
   timezone?: string;
-  settings?: { durationMinutes?: number; [key: string]: unknown };
-  sections?: { id: string; _count?: { questions: number } }[];
+  settings?: {
+    durationMinutes?: number;
+    combinedSubjects?: boolean;
+    subjectId?: string;
+    [key: string]: unknown;
+  };
+  sections?: { id: string; name?: string; _count?: { questions: number } }[];
   aiTestConfig?: {
+    subjectId?: string | null;
     batch?: {
       id: string;
       name: string;
@@ -196,7 +203,12 @@ export type ExamListItem = {
       academicClass: { id: string; name: string; level: number };
     } | null;
   } | null;
-  _count?: { registrations: number; sessions: number; results: number };
+  _count?: {
+    registrations: number;
+    sessions: number;
+    results: number;
+    attemptedStudents?: number;
+  };
 };
 
 export type ExamDetail = Omit<ExamListItem, 'sections'> & {
@@ -209,6 +221,7 @@ export type ExamDetail = Omit<ExamListItem, 'sections'> & {
     };
   }[];
   aiTestConfig?: {
+    subjectId?: string | null;
     batchId?: string | null;
     batch?: {
       id: string;
@@ -244,9 +257,13 @@ export type ExamDetail = Omit<ExamListItem, 'sections'> & {
 export type CandidateListItem = {
   id: string;
   registrationNumber: string;
+  gender?: string | null;
+  guardianName?: string | null;
+  guardianPhone?: string | null;
   kycStatus?: string;
   createdAt?: string;
-  user: { firstName: string; lastName: string; email: string; status?: string };
+  createdBy?: { id: string; name: string; email: string } | null;
+  user: { firstName: string; lastName: string; email: string; phone?: string | null; status?: string };
   batchEnrollments?: {
     id: string;
     rollNumber?: string | null;
@@ -262,6 +279,9 @@ export type CandidateListItem = {
 export type CandidateKycDetail = {
   id: string;
   registrationNumber: string;
+  gender?: string | null;
+  guardianName?: string | null;
+  guardianPhone?: string | null;
   kycStatus: string;
   profileData?: {
     documentType?: string;
@@ -418,17 +438,7 @@ export async function apiFetch<T>(endpoint: string, options: ApiOptions = {}): P
 }
 
 function formatApiError(data: unknown): string {
-  if (!data || typeof data !== 'object') return 'Request failed';
-  const record = data as Record<string, unknown>;
-  const nested =
-    record.error && typeof record.error === 'object'
-      ? (record.error as Record<string, unknown>).message
-      : undefined;
-  const detail = record.detail;
-  const message = nested ?? record.message ?? detail;
-  if (Array.isArray(message)) return message.join(', ');
-  if (typeof message === 'string' && message.length > 0) return message;
-  return 'Request failed';
+  return formatApiErrorPayload(data);
 }
 
 function isRetryableAiTransportError(message: string): boolean {
@@ -574,9 +584,9 @@ export const dashboardApi = {
 };
 
 export const examsApi = {
-  list: (token: string, page = 1, search = '', limit = 20) =>
+  list: (token: string, page = 1, search = '', limit = 20, publishedOnly = false) =>
     apiFetch<Paginated<ExamListItem>>(
-      `/exams?page=${page}&limit=${limit}${search ? `&search=${encodeURIComponent(search)}` : ''}`,
+      `/exams?page=${page}&limit=${limit}${search ? `&search=${encodeURIComponent(search)}` : ''}${publishedOnly ? '&publishedOnly=true' : ''}`,
       authHeaders(token),
     ),
   get: (token: string, id: string) => apiFetch<ExamDetail>(`/exams/${id}`, authHeaders(token)),
@@ -663,8 +673,12 @@ export const candidatesApi = {
     password: string;
     firstName: string;
     lastName: string;
+    gender: string;
+    studentMobile: string;
+    guardianName: string;
+    guardianPhone: string;
     registrationNumber?: string;
-    batchId?: string;
+    batchId: string;
     rollNumber?: string;
   }) =>
     apiFetch('/candidates', { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
@@ -683,6 +697,18 @@ export const candidatesApi = {
       '/candidates/registration-invites',
       { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) },
     ),
+  listRegistrationInvites: (token: string, page = 1, limit = 50) => {
+    const q = new URLSearchParams({ page: String(page), limit: String(limit) });
+    return apiFetch<Paginated<{
+      id: string;
+      email: string;
+      firstName?: string | null;
+      lastName?: string | null;
+      expiresAt?: string | null;
+      createdAt?: string | null;
+      batch?: { id: string; name: string; academicYear: string } | null;
+    }>>(`/candidates/registration-invites?${q}`, authHeaders(token));
+  },
   dashboard: (token: string) => apiFetch('/candidates/me/dashboard', authHeaders(token)),
   admitCard: (token: string, examId: string) =>
     apiFetch(`/candidates/me/admit-card/${examId}`, authHeaders(token)),
@@ -967,6 +993,31 @@ export const curriculumApi = {
   getClass: (token: string, id: string) => apiFetch(`/curriculum/classes/${id}`, authHeaders(token)),
   getSubjectChapters: (token: string, subjectId: string) =>
     apiFetch(`/curriculum/subjects/${subjectId}/chapters`, authHeaders(token)),
+  createSubject: (
+    token: string,
+    body: { academicClassId: string; name: string; code?: string; description?: string },
+  ) =>
+    apiFetch('/curriculum/subjects', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      ...authHeaders(token),
+    }),
+  getOfferedSubjects: (token: string, academicClassId: string) =>
+    apiFetch<{
+      academicClassId: string;
+      configured: boolean;
+      offeredSubjectIds: string[];
+      subjects: { id: string; name: string; code: string; offered: boolean; canDelete: boolean }[];
+      catalogSubjects?: { id: string; name: string; code: string; offered: boolean; canDelete: boolean }[];
+    }>(`/curriculum/classes/${academicClassId}/offered-subjects`, authHeaders(token)),
+  setOfferedSubjects: (token: string, academicClassId: string, subjectIds: string[]) =>
+    apiFetch(`/curriculum/classes/${academicClassId}/offered-subjects`, {
+      method: 'PUT',
+      body: JSON.stringify({ subjectIds }),
+      ...authHeaders(token),
+    }),
+  deleteSubject: (token: string, subjectId: string) =>
+    apiFetch(`/curriculum/subjects/${subjectId}`, { method: 'DELETE', ...authHeaders(token) }),
 };
 
 export const batchesApi = {
@@ -988,11 +1039,22 @@ export const batchesApi = {
     apiFetch(`/batches/teacher-assignments${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`, authHeaders(token)),
   assignTeacher: (token: string, batchId: string, body: { userId: string; subjectId?: string; subjectIds?: string[] }) =>
     apiFetch(`/batches/${batchId}/teachers`, { method: 'POST', body: JSON.stringify(body), ...authHeaders(token) }),
+  updateTeacher: (
+    token: string,
+    batchId: string,
+    assignmentId: string,
+    body: { userId: string; subjectId: string },
+  ) =>
+    apiFetch(`/batches/${batchId}/teachers/${assignmentId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+      ...authHeaders(token),
+    }),
   removeTeacher: (token: string, batchId: string, assignmentId: string) =>
     apiFetch(`/batches/${batchId}/teachers/${assignmentId}`, { method: 'DELETE', ...authHeaders(token) }),
   getSyllabusProgress: (token: string, batchId: string, subjectId?: string) =>
     apiFetch(`/batches/${batchId}/syllabus-progress${subjectId ? `?subjectId=${subjectId}` : ''}`, authHeaders(token)),
-  updateSyllabusProgress: (token: string, batchId: string, body: { chapterId?: string; topicId?: string; status: string }) =>
+  updateSyllabusProgress: (token: string, batchId: string, body: { chapterId?: string; topicId?: string; materialId?: string; status: string }) =>
     apiFetch(`/batches/${batchId}/syllabus-progress`, { method: 'PATCH', body: JSON.stringify(body), ...authHeaders(token) }),
 };
 
@@ -1016,8 +1078,20 @@ export const materialsApi = {
     postMaterialsFormData(token, getMaterialsBatchUploadUrl(), formData),
   reconcileSubjects: (token: string) =>
     apiFetch('/materials/reconcile-subjects', { method: 'POST', ...authHeaders(token) }),
+  update: (
+    token: string,
+    id: string,
+    body: { title?: string; academicClassId?: string; subjectId?: string },
+  ) =>
+    apiFetch(`/materials/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+      ...authHeaders(token),
+    }),
   reindex: (token: string, id: string) =>
     apiFetch(`/materials/${id}/reindex`, { method: 'POST', ...authHeaders(token) }),
+  chapters: (token: string, id: string) =>
+    apiFetch(`/materials/${id}/chapters`, authHeaders(token)),
   delete: (token: string, id: string) =>
     apiFetch(`/materials/${id}`, { method: 'DELETE', ...authHeaders(token) }),
   openFile: async (token: string, id: string) => {
@@ -1044,6 +1118,29 @@ export const materialsApi = {
     const objectUrl = URL.createObjectURL(blob);
     window.open(objectUrl, '_blank', 'noopener,noreferrer');
     setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  },
+  createFileObjectUrl: async (token: string, id: string) => {
+    const url = `${getApiUrl()}/materials/${id}/file`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Tenant-ID': getAuthTenantId(),
+        'X-Device-Fingerprint': getFingerprint(),
+      },
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      const raw = await res.text();
+      let message = 'Could not load file';
+      try {
+        message = formatApiError(JSON.parse(raw));
+      } catch {
+        if (raw && !raw.trimStart().startsWith('{')) message = raw;
+      }
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
   },
   downloadFile: async (token: string, id: string, fileName: string) => {
     const url = `${getApiUrl()}/materials/${id}/file?download=1`;
@@ -1114,21 +1211,48 @@ export type RolePermissionMatrix = {
   teacherCustomized: Record<string, boolean>;
 };
 
+const DISABLED_ROLE_PERMISSION_ROLES = new Set(['INSTITUTE_ADMIN']);
+
+function withoutDisabledRolePermissionRoles(matrix: RolePermissionMatrix): RolePermissionMatrix {
+  if (INSTITUTE_ADMIN_ENABLED) return matrix;
+  const roles = matrix.roles.filter((role) => !DISABLED_ROLE_PERMISSION_ROLES.has(role.name));
+  const omitDisabled = <T extends Record<string, unknown>>(record: T) => {
+    const next = { ...record };
+    for (const name of DISABLED_ROLE_PERMISSION_ROLES) {
+      delete next[name];
+    }
+    return next;
+  };
+  return {
+    ...matrix,
+    roles,
+    granted: omitDisabled(matrix.granted),
+    defaults: omitDisabled(matrix.defaults),
+    customized: omitDisabled(matrix.customized),
+  };
+}
+
 export const rolePermissionsApi = {
-  matrix: (token: string) =>
-    apiFetch<RolePermissionMatrix>('/role-permissions', authHeaders(token)),
-  save: (token: string, role: string, permissions: string[], userId?: string) =>
-    apiFetch<RolePermissionMatrix>('/role-permissions', {
-      method: 'PUT',
-      body: JSON.stringify({ role, permissions, userId: userId || undefined }),
-      ...authHeaders(token),
-    }),
-  reset: (token: string, role: string, userId?: string) =>
-    apiFetch<RolePermissionMatrix>('/role-permissions', {
-      method: 'PUT',
-      body: JSON.stringify({ role, reset: true, permissions: [], userId: userId || undefined }),
-      ...authHeaders(token),
-    }),
+  matrix: async (token: string) =>
+    withoutDisabledRolePermissionRoles(
+      await apiFetch<RolePermissionMatrix>('/role-permissions', authHeaders(token)),
+    ),
+  save: async (token: string, role: string, permissions: string[], userId?: string) =>
+    withoutDisabledRolePermissionRoles(
+      await apiFetch<RolePermissionMatrix>('/role-permissions', {
+        method: 'PUT',
+        body: JSON.stringify({ role, permissions, userId: userId || undefined }),
+        ...authHeaders(token),
+      }),
+    ),
+  reset: async (token: string, role: string, userId?: string) =>
+    withoutDisabledRolePermissionRoles(
+      await apiFetch<RolePermissionMatrix>('/role-permissions', {
+        method: 'PUT',
+        body: JSON.stringify({ role, reset: true, permissions: [], userId: userId || undefined }),
+        ...authHeaders(token),
+      }),
+    ),
 };
 
 export const tenantsApi = {
