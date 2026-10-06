@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal, get_db
-from app.core.security import get_current_user, loaded_role_names, require_permission
+from app.core.security import fetch_role_names_for_user, get_current_user, require_permission
 from app.models.curriculum import Batch, Book, Chapter, Subject
 from app.models.material import StudyMaterial
 from app.models.user import User
@@ -147,8 +147,9 @@ def _normalize_mime(file_name: str, mime_type: str) -> str:
     return mime_type
 
 
-def _user_can_purge_all_materials(user: User) -> bool:
-    roles = {name.strip().upper() for name in loaded_role_names(user)}
+async def _user_can_purge_all_materials(db: AsyncSession, user: User) -> bool:
+    role_names = await fetch_role_names_for_user(db, str(user.id))
+    roles = {name.strip().upper() for name in role_names}
     return bool(roles & _PURGE_ALL_MATERIALS_ROLES)
 
 
@@ -903,12 +904,13 @@ async def reindex_material(
 
 @router.delete("/all")
 async def delete_all_materials(
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("material:delete")),
 ):
     """Remove every study material for this tenant (elevated admins only)."""
     from sqlalchemy.exc import DBAPIError
 
-    if not _user_can_purge_all_materials(current_user):
+    if not await _user_can_purge_all_materials(db, current_user):
         raise HTTPException(
             status_code=403,
             detail="Only institute admins can delete all documents.",

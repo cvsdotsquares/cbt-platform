@@ -27,7 +27,7 @@ async def get_role_permission_matrix(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    assert_super_admin(current_user)
+    await assert_super_admin(db, current_user)
     return await build_matrix(db, str(current_user.tenant_id))
 
 
@@ -37,7 +37,7 @@ async def update_role_permission_matrix(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    assert_super_admin(current_user)
+    await assert_super_admin(db, current_user)
     return await save_role_permissions(
         db,
         str(current_user.tenant_id),

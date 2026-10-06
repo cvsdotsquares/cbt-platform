@@ -284,7 +284,10 @@ async def update_tenant_branding(
     current_user: User = Depends(require_permission("tenant:branding")),
 ):
     if str(current_user.tenant_id) != str(tenant_id):
-        user_roles = {name.strip().upper() for name in loaded_role_names(current_user)}
+        from app.core.security import fetch_role_names_for_user
+
+        role_names = await fetch_role_names_for_user(db, str(current_user.id))
+        user_roles = {name.strip().upper() for name in role_names}
         if not user_roles & {"SUPER_ADMIN", "ADMIN"}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot update another institute")
     tenant = await _get_tenant_or_404(db, str(tenant_id))

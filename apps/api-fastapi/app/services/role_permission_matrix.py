@@ -13,7 +13,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import ROLE_PERMISSIONS, loaded_role_names
+from app.core.security import ROLE_PERMISSIONS, fetch_role_names_for_user
 from app.models.user import User
 
 SETTINGS_KEY = "rolePermissions"
@@ -171,8 +171,8 @@ CATALOG_CODES: set[str] = {
 CONFIGURABLE_ROLE_NAMES = {role["name"] for role in CONFIGURABLE_ROLES}
 
 
-def assert_super_admin(user: User) -> None:
-    names = {name.upper() for name in loaded_role_names(user)}
+async def assert_super_admin(db: AsyncSession, user: User) -> None:
+    names = {name.upper() for name in await fetch_role_names_for_user(db, str(user.id))}
     if "SUPER_ADMIN" not in names:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

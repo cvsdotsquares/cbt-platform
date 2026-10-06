@@ -88,7 +88,7 @@ export default function RolePermissionsPage() {
     if (!isSuperAdmin) router.replace('/dashboard');
   }, [ready, user, isSuperAdmin, router]);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['role-permissions', 'teacher-only'],
     queryFn: () => rolePermissionsApi.matrix(accessToken!),
     enabled: ready && !!accessToken && isSuperAdmin,
@@ -263,7 +263,11 @@ export default function RolePermissionsPage() {
         </div>
       </div>
 
-      {isLoading || !data ? (
+      {isError ? (
+        <p className="rounded-2xl border border-destructive/30 bg-destructive/5 px-5 py-8 text-center text-sm text-destructive">
+          Could not load role permissions.{error instanceof Error ? ` ${error.message}` : ''}
+        </p>
+      ) : isLoading || !data ? (
         <TableSkeleton rows={6} />
       ) : (
         <div className="space-y-4">
